@@ -1,0 +1,149 @@
+# ============================================================================
+# Python
+# ============================================================================
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+# ============================================================================
+# Virtual Environments
+# ============================================================================
+.venv/
+venv/
+ENV/
+env/
+
+# ============================================================================
+# IDE / Editor
+# ============================================================================
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# ============================================================================
+# Project: Experiment Outputs
+# ============================================================================
+# All experiment data (worktrees, results, hypotheses, analysis)
+experiments/*
+
+# Keep directory structure but ignore contents
+!experiments/.gitkeep
+!experiments/worktrees/.gitkeep
+!experiments/results/.gitkeep
+!experiments/hypotheses/.gitkeep
+!experiments/analysis/.gitkeep
+!experiments/kaggle_data/.gitkeep
+
+# ============================================================================
+# Project: Logs
+# ============================================================================
+logs/*
+!logs/.gitkeep
+*.log
+
+# ============================================================================
+# Project: Kaggle Integration
+# ============================================================================
+# Kaggle API credentials (NEVER commit this!)
+kaggle.json
+**/kaggle.json
+
+# Kaggle crawler output (large datasets)
+kaggle_competitions/
+
+# ============================================================================
+# Project: AI Integration (Codex/Claude)
+# ============================================================================
+# Codex execution outputs
+**/codex_output_*.md
+**/codex_response.md
+
+# AI usage tracking
+codex_usage.json
+claude_usage.json
+experiments/codex_usage.json
+experiments/claude_usage.json
+
+# AI session data
+.claude_sessions/
+.codex_sessions/
+
+# ============================================================================
+# Project: Test Files
+# ============================================================================
+# Temporary test outputs
+test_output/
+tmp/
+temp/
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Test experiment files
+**/test_exp_*/
+**/DONE_test_*
+**/result_test_*
+**/submission_test_*
+
+# ============================================================================
+# Project: Documentation Builds
+# ============================================================================
+docs/_build/
+site/
+
+# ============================================================================
+# OS / System
+# ============================================================================
+.DS_Store
+Thumbs.db
+Desktop.ini
+
+# ============================================================================
+# Backup Files
+# ============================================================================
+*.bak
+*.backup
+*.old
+*~
+
+# ============================================================================
+# Jupyter Notebooks
+# ============================================================================
+.ipynb_checkpoints/
+*.ipynb_checkpoints
+
+# ============================================================================
+# Environment Variables
+# ============================================================================
+.env
+.env.local
+.env.*.local
+
+# ============================================================================
+# Package Manager
+# ============================================================================
+uv.lock
+node_modules/
+package-lock.json
+yarn.lock

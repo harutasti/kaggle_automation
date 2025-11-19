@@ -1,0 +1,109 @@
+import os
+from typing import List, Optional
+import datetime
+
+from ..core.base_component import BaseComponent
+from ..data_models import ExperimentResult, AnalysisResult
+from ..utils.file_utils import write_markdown, ensure_dir
+
+class PerformanceAnalyzer(BaseComponent):
+    def __init__(self, config: dict):
+        super().__init__(config)
+        self.analysis_dir = os.path.join(config.get("experiments_base_dir", "./experiments"), "analysis")
+        ensure_dir(self.analysis_dir)
+
+    def analyze_results(self, iteration: int, results: List[ExperimentResult]) -> AnalysisResult:
+        """指定されたイテレーションの結果と過去の結果を分析する"""
+        method_name = "analyze_results"
+        self._log_start(method_name, iteration=iteration, num_results=len(results))
+
+        if not results:
+            self.logger.warning("No results provided for analysis.")
+            summary = f"# Analysis Report - Iteration {iteration}\n\nNo results available for this iteration."
+            analysis = AnalysisResult(
+                iteration=iteration,
+                summary_markdown=summary,
+                best_score=None,
+                best_experiment_id=None,
+                improvement_trend="N/A",
+                recommended_strategies=[]
+            )
+            write_markdown(summary, os.path.join(self.analysis_dir, f"analysis_iter_{iteration}.md"))
+            self._log_end(method_name, analysis)
+            return analysis
+
+        # --- 簡単な分析ロジック ---
+        successful_results = [r for r in results if r.status == "SUCCESS" and r.score is not None]
+        failed_results = [r for r in results if r.status != "SUCCESS"]
+
+        best_score_current_iter = None
+        best_exp_id_current_iter = None
+        scores = []
+        if successful_results:
+            successful_results.sort(key=lambda r: r.score, reverse=True) # スコアで降順ソート
+            best_exp_current_iter = successful_results[0]
+            best_score_current_iter = best_exp_current_iter.score
+            best_exp_id_current_iter = best_exp_current_iter.experiment_id
+            scores = [r.score for r in successful_results]
+            self.logger.info(f"Best score in iteration {iteration}: {best_score_current_iter:.4f} (Exp ID: {best_exp_id_current_iter})")
+
+        # 改善傾向の判断（仮：前のイテレーションのベストと比較、ただし全履歴が必要）
+        # このためにはRADから全履歴を取得する必要がある
+        # all_results = rad.get_all_results() # RADインスタンスが必要
+        improvement_trend = "N/A" # TODO: 実装
+
+        # 次の戦略の推奨（仮：成功した戦略と、失敗しなかった戦略をリストアップ）
+        successful_strategies = set(r.strategy_name for r in successful_results)
+        failed_strategies = set(r.strategy_name for r in failed_results)
+        recommended_strategies = list(successful_strategies) + [s for s in list(set(r.strategy_name for r in results)) if s not in failed_strategies and s not in successful_strategies]
+        # スコアが良い戦略を優先するロジックなども追加可能
+        # 新しい戦略を試す、といったロジックもここに入れる
+
+        # --- 分析レポートMarkdown生成 ---
+        summary_md = f"# Analysis Report - Iteration {iteration}\n\n"
+        summary_md += f"Date: {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n"
+        summary_md += f"## Overview\n"
+        summary_md += f"- Experiments Processed: {len(results)}\n"
+        summary_md += f"- Successful Runs: {len(successful_results)}\n"
+        summary_md += f"- Failed Runs: {len(failed_results)}\n\n"
+
+        if best_score_current_iter is not None:
+            summary_md += f"## Performance\n"
+            summary_md += f"- **Best Score:** {best_score_current_iter:.4f}\n"
+            summary_md += f"- Best Experiment ID: {best_exp_id_current_iter}\n"
+            summary_md += f"- Score Distribution (Successful Runs): Avg={sum(scores)/len(scores):.4f}, Min={min(scores):.4f}, Max={max(scores):.4f}\n"
+            summary_md += f"- Improvement Trend: {improvement_trend}\n\n" # TODO
+        else:
+            summary_md += "## Performance\nNo successful runs with scores in this iteration.\n\n"
+
+        if failed_results:
+            summary_md += f"## Failures\n"
+            for fr in failed_results[:5]: # 上位5件まで表示
+                summary_md += f"- {fr.experiment_id} ({fr.strategy_name}): Status={fr.status}\n" # Error messageも表示すると良い
+            if len(failed_results) > 5:
+                summary_md += "- ... (and more)\n"
+            summary_md += "\n"
+
+        summary_md += f"## Recommendations for Next Iteration\n"
+        if recommended_strategies:
+            summary_md += "- Prioritize strategies: " + ", ".join(recommended_strategies) + "\n"
+        else:
+            summary_md += "- No specific strategy recommendations based on this iteration.\n"
+        summary_md += "- Consider exploring hyperparameter tuning for top performers.\n" # 例
+        summary_md += "- Consider investigating failures.\n" # 例
+
+        analysis_file_path = os.path.join(self.analysis_dir, f"analysis_iter_{iteration}.md")
+        write_markdown(summary_md, analysis_file_path)
+        self.logger.info(f"Analysis report saved to: {analysis_file_path}")
+
+        analysis = AnalysisResult(
+            iteration=iteration,
+            summary_markdown=summary_md, # ファイルパスでも良いかもしれない
+            best_score=best_score_current_iter,
+            best_experiment_id=best_exp_id_current_iter,
+            improvement_trend=improvement_trend,
+            recommended_strategies=recommended_strategies
+        )
+
+        self._log_end(method_name, analysis)
+        return analysis

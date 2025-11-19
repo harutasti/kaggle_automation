@@ -1,0 +1,15 @@
+{
+  "kaggle_competition_name": "house-prices-advanced-regression-techniques",
+  "max_iterations": 5,
+  "wca_per_iteration": 3,
+  "stop_condition": {
+    "score_threshold": 0.95,
+    "no_improvement_iterations": 2
+  },
+  "experiments_base_dir": "./experiments",
+  "log_file": "./logs/auto_kaggle.log",
+  "log_level": "INFO",
+  "simulation_mode": true,
+  "use_crawler": true,
+  "max_discussions": 20
+}
