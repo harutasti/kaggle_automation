@@ -118,6 +118,7 @@ site/
 .DS_Store
 Thumbs.db
 Desktop.ini
+*:Zone.Identifier
 
 # ============================================================================
 # Backup Files
