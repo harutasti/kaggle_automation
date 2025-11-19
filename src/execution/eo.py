@@ -9,6 +9,7 @@ import git # GitPython
 from ..core.base_component import BaseComponent
 from ..data_models import ExperimentHypothesis
 from ..utils.file_utils import ensure_dir, remove_dir
+from .codex_launcher import CodexExperimentLauncher
 
 class ExperimentOrchestrator(BaseComponent):
     def __init__(self, config: dict):
@@ -18,7 +19,17 @@ class ExperimentOrchestrator(BaseComponent):
         self.wca_simulator_script = os.path.abspath(os.path.join(os.path.dirname(__file__), 'wca_simulator.py'))
         ensure_dir(self.worktree_base_dir)
         self.repo = self._get_git_repo()
-        self.active_processes: Dict[str, Tuple[multiprocessing.Process, str]] = {} # {exp_id: (process, worktree_path)}
+        self.active_processes: Dict[str, Tuple[subprocess.Popen, str]] = {} # {exp_id: (process, worktree_path)}
+
+        # Execution mode: 'simulation' or 'codex'
+        self.execution_mode = config.get("execution_mode", "simulation")
+        self.codex_launcher = None
+
+        if self.execution_mode == "codex":
+            self.logger.info("Initializing Codex execution mode")
+            self.codex_launcher = CodexExperimentLauncher(config)
+        else:
+            self.logger.info("Using simulation execution mode")
 
     def _get_git_repo(self):
         """現在のディレクトリのGitリポジトリを取得"""
@@ -56,7 +67,7 @@ class ExperimentOrchestrator(BaseComponent):
 
 
     def launch_experiments(self, hypotheses: List[ExperimentHypothesis]) -> List[str]:
-        """実験仮説に基づいてWCAシミュレータを並列起動する"""
+        """実験仮説に基づいてWCAシミュレータまたはCodexを並列起動する"""
         method_name = "launch_experiments"
         self._log_start(method_name, num_hypotheses=len(hypotheses))
         launched_ids = []
@@ -75,42 +86,89 @@ class ExperimentOrchestrator(BaseComponent):
                 # 1. Git Worktreeを作成 (既存ならエラーになるので事前削除推奨 or 例外処理)
                 if os.path.exists(worktree_path):
                      self.logger.warning(f"Worktree path {worktree_path} already exists. Skipping creation, assuming it's usable or will be cleaned later.")
-                     # 必要であればここで削除・再作成のロジックを入れる
-                     # remove_dir(worktree_path)
-                     # self.repo.git.worktree('prune')
                 else:
-                     # mainブランチなど、起点となるブランチを指定
-                     # ここではリポジトリの現在のHEADから作成
                      start_point = self.repo.head.commit
                      self.repo.git.worktree('add', '-b', branch_name, worktree_path, start_point)
                      self.logger.info(f"Created Git worktree at: {worktree_path} on branch {branch_name}")
 
-                # 2. WCAシミュレータを別プロセスで起動
-                cmd = [
-                    'python', self.wca_simulator_script,
-                    '--worktree-path', worktree_path,
-                    '--task-markdown-path', hypothesis.task_markdown_path,
-                    '--experiment-id', exp_id,
-                    '--log-level', self.config.get("log_level", "INFO") # ログレベルを引き継ぐ
-                ]
-                # Use subprocess.Popen directly instead of multiprocessing.Process
-                process = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
-                processes_to_start.append((process, exp_id, worktree_path))
-                launched_ids.append(exp_id)
+                # 2. 実行モードに応じてプロセスを起動
+                if self.execution_mode == "codex":
+                    # Codexモード: codex execを使用
+                    process = self._launch_codex_experiment(hypothesis, worktree_path, exp_id)
+                else:
+                    # シミュレーションモード: WCAシミュレータを使用
+                    cmd = [
+                        'python', self.wca_simulator_script,
+                        '--worktree-path', worktree_path,
+                        '--task-markdown-path', hypothesis.task_markdown_path,
+                        '--experiment-id', exp_id,
+                        '--log-level', self.config.get("log_level", "INFO")
+                    ]
+                    process = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+
+                if process:
+                    processes_to_start.append((process, exp_id, worktree_path))
+                    launched_ids.append(exp_id)
 
             except git.GitCommandError as e:
                 self.logger.error(f"Git command failed for {exp_id} at {worktree_path}: {e.stderr}")
             except Exception as e:
                 self.logger.error(f"Failed to prepare or launch experiment {exp_id}: {e}")
 
-        # プロセスを一括で開始
+        # プロセスを一括で登録
         for process, exp_id, worktree_path in processes_to_start:
-             # No need to start process as Popen already starts it
              self.active_processes[exp_id] = (process, worktree_path)
-             self.logger.info(f"Launched WCA simulator process for experiment {exp_id} (PID: {process.pid})")
+             self.logger.info(f"Launched {'Codex' if self.execution_mode == 'codex' else 'WCA simulator'} process for experiment {exp_id} (PID: {process.pid})")
 
         self._log_end(method_name, result=f"Launched {len(launched_ids)} processes.")
         return launched_ids
+
+    def _launch_codex_experiment(self, hypothesis: ExperimentHypothesis, worktree_path: str, exp_id: str) -> Optional[subprocess.Popen]:
+        """Codexを使って実験を起動する"""
+        try:
+            # タスクマークダウンを読み込む
+            with open(hypothesis.task_markdown_path, 'r', encoding='utf-8') as f:
+                task_content = f.read()
+
+            # Codexへの入力を準備
+            stdin_input = f"""Your Task:
+{task_content}
+
+Please execute the experiment exactly as described above. Ensure you:
+1. Create the result_{exp_id}.json file with the score
+2. Create the DONE_{exp_id} file when complete
+3. Save predictions to submission_{exp_id}.csv
+"""
+            # codex execをバックグラウンドで起動
+            codex_config = self.config.get("codex", {})
+            cmd = ['codex', 'exec']
+
+            if codex_config.get("skip_confirmation", True):
+                cmd.append('--skip-git-repo-check')
+
+            process = subprocess.Popen(
+                cmd,
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                cwd=worktree_path,
+                text=True
+            )
+
+            # 非同期で入力を送信（ブロックしないように）
+            if process.stdin:
+                process.stdin.write(stdin_input)
+                process.stdin.close()
+
+            self.logger.info(f"Launched Codex process for {exp_id} in {worktree_path}")
+            return process
+
+        except FileNotFoundError as e:
+            self.logger.error(f"Codex CLI not found. Is it installed and in PATH? Error: {e}")
+            return None
+        except Exception as e:
+            self.logger.error(f"Failed to launch Codex for {exp_id}: {e}")
+            return None
 
     # _run_wca_simulator method removed since we now use subprocess.Popen directly
 

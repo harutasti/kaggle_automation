@@ -1,6 +1,7 @@
 import os
 import sys
 import json
+import argparse
 
 project_root = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, project_root)
@@ -9,16 +10,25 @@ from src.core.mcdu import MasterControllerDecisionUnit
 from src.utils.logger import setup_logger
 from src.utils.file_utils import ensure_dir
 
-CONFIG_FILE = "config/config.json"
+DEFAULT_CONFIG_FILE = "config/config.json"
 
 def main():
-    print("Starting AutoKaggle Simulator...")
+    parser = argparse.ArgumentParser(description="AutoKaggle - Automated Kaggle Competition System")
+    parser.add_argument(
+        "--config", "-c",
+        default=DEFAULT_CONFIG_FILE,
+        help=f"Path to configuration file (default: {DEFAULT_CONFIG_FILE})"
+    )
+    args = parser.parse_args()
+
+    config_file = args.config
+    print(f"Starting AutoKaggle with config: {config_file}")
 
     try:
-        with open(CONFIG_FILE, 'r', encoding='utf-8') as f:
+        with open(config_file, 'r', encoding='utf-8') as f:
             config = json.load(f)
     except Exception as e:
-        print(f"Error loading config file '{CONFIG_FILE}': {e}")
+        print(f"Error loading config file '{config_file}': {e}")
         sys.exit(1)
 
     log_dir = os.path.dirname(config.get("log_file", "./logs/auto_kaggle.log"))
@@ -39,9 +49,9 @@ def main():
 
 
     try:
-        mcdu = MasterControllerDecisionUnit(CONFIG_FILE)
+        mcdu = MasterControllerDecisionUnit(config_file)
         mcdu.run_main_loop()
-        logger.info("AutoKaggle Simulator finished successfully.")
+        logger.info("AutoKaggle finished successfully.")
     except Exception as e:
         logger.critical("An unhandled exception occurred in the main loop.", exc_info=True)
         print(f"Critical error: {e}. Check log file for details.")

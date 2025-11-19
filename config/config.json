@@ -1,5 +1,5 @@
 {
-  "kaggle_competition_name": "house-prices-advanced-regression-techniques",
+  "kaggle_competition_name": "titanic",
   "max_iterations": 5,
   "wca_per_iteration": 3,
   "stop_condition": {
