@@ -33,8 +33,9 @@ class PerformanceAnalyzer(BaseComponent):
             return analysis
 
         # --- 簡単な分析ロジック ---
-        successful_results = [r for r in results if r.status == "SUCCESS" and r.score is not None]
-        failed_results = [r for r in results if r.status != "SUCCESS"]
+        # Accept any result with a valid score that doesn't have an error status
+        successful_results = [r for r in results if r.score is not None and r.status != "error"]
+        failed_results = [r for r in results if r.status == "error" or r.score is None]
 
         best_score_current_iter = None
         best_exp_id_current_iter = None

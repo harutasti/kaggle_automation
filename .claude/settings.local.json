@@ -6,7 +6,14 @@
       "Bash(uv run:*)",
       "Bash(git init:*)",
       "Bash(git add:*)",
-      "Bash(git commit:*)"
+      "Bash(git commit:*)",
+      "Bash(cat:*)",
+      "Bash(codex:*)",
+      "Read(//home/gotoubunbun/.codex/**)",
+      "Bash(kaggle competitions download:*)",
+      "Bash(unzip:*)",
+      "Bash(kill:*)",
+      "Bash(test:*)"
     ],
     "deny": [],
     "ask": []
