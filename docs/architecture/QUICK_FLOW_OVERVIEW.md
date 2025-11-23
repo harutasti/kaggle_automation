@@ -10,8 +10,8 @@ flowchart TD
     MainLoop -->|No| End([End: Best Model Found])
     
     MainLoop -->|Yes| Step1[1. Get Competition Data]
-    Step1 --> Step2[2. Analyze with Claude]
-    Step2 --> Step3[3. Generate ML Strategies] 
+    Step1 --> Step2[2. Analyze Competition]
+    Step2 --> Step3[3. Generate ML Strategies]
     Step3 --> Step4[4. Execute Experiments]
     Step4 --> Step5[5. Collect Results]
     Step5 --> Step6[6. Analyze Performance]
@@ -36,7 +36,7 @@ graph TB
     end
     
     subgraph "📊 Kaggle Interface (KIM)"
-        KIM[Downloads competition data<br/>Runs kaggle_crawler<br/>Integrates Claude analysis]
+        KIM[Downloads competition data<br/>Runs kaggle_crawler<br/>Parses competition info]
     end
     
     subgraph "🧠 Strategy Engine (KSE)"
@@ -63,7 +63,7 @@ sequenceDiagram
     participant User
     participant AutoKaggler
     participant Kaggle
-    participant Claude
+    participant Codex
     participant Git
     
     User->>AutoKaggler: Start with competition name
@@ -72,15 +72,15 @@ sequenceDiagram
         AutoKaggler->>Kaggle: Fetch competition data
         Kaggle-->>AutoKaggler: Data & metadata
         
-        AutoKaggler->>Claude: Analyze competition
-        Claude-->>AutoKaggler: Insights & suggestions
+        AutoKaggler->>Codex: Analyze competition (optional)
+        Codex-->>AutoKaggler: Insights & suggestions
         
         AutoKaggler->>AutoKaggler: Generate experiments
         
         loop Each Experiment
             AutoKaggler->>Git: Create worktree
-            AutoKaggler->>Claude: Execute ML code
-            Claude-->>AutoKaggler: Results
+            AutoKaggler->>Codex: Execute ML code (if enabled)
+            Codex-->>AutoKaggler: Results
             AutoKaggler->>Git: Cleanup worktree
         end
         
@@ -101,7 +101,7 @@ mindmap
         Competition data
         Leaderboard
         Submissions
-      Claude Code
+      Codex
         Competition analysis
         Code generation
         Experiment execution
@@ -119,10 +119,6 @@ mindmap
         Competition settings
         API credentials
         Execution parameters
-      CLAUDE.md
-        Project instructions
-        Code style guide
-        Tool preferences
 ```
 
 ## Data Flow Summary
@@ -132,8 +128,8 @@ flowchart LR
     Competition[Kaggle Competition] --> Crawler[kaggle_crawler]
     Crawler --> RawData[Raw Data<br/>Pages, Discussions]
     
-    RawData --> Claude[Claude Analysis]
-    Claude --> EnrichedData[Enriched Data<br/>+ Insights]
+    RawData --> AIAnalysis[AI Analysis]
+    AIAnalysis --> EnrichedData[Enriched Data<br/>+ Insights]
     
     EnrichedData --> Strategies[ML Strategies]
     Strategies --> Experiments[Experiments]
@@ -144,19 +140,19 @@ flowchart LR
     Analysis --> Learning[Learning<br/>Feedback]
     Learning --> Strategies
     
-    style Claude fill:#2196F3,color:#fff
+    style AIAnalysis fill:#2196F3,color:#fff
     style Analysis fill:#4CAF50,color:#fff
 ```
 
 ## Quick Start Understanding
 
 1. **Input**: Kaggle competition name
-2. **Process**: Automated ML pipeline with Claude integration
+2. **Process**: Automated ML pipeline with optional AI support
 3. **Output**: Best performing model and submission
 
 ### The Loop:
 1. 📥 **Fetch** - Get competition data
-2. 🤖 **Analyze** - Claude understands the problem
+2. 🤖 **Analyze** - AI agent reviews the problem (optional)
 3. 💡 **Strategize** - Generate ML approaches
 4. 🧪 **Experiment** - Run isolated experiments
 5. 📊 **Evaluate** - Measure performance
@@ -164,7 +160,7 @@ flowchart LR
 
 ### Key Features:
 - **Fully Automated**: Runs without manual intervention
-- **Claude-Powered**: Leverages AI for analysis and coding
+- **AI-Powered (optional)**: Can leverage Codex for analysis and coding
 - **Isolated Experiments**: Each experiment in its own Git worktree
 - **Continuous Learning**: Improves strategies based on results
 - **Flexible**: Supports both real execution and simulation mode

@@ -14,14 +14,14 @@ class BaseComponent:
     def _log_end(self, method_name: str, result: any = None):
         self.logger.info(f"Finished {method_name}.")
         if result is not None:
-             # 大きすぎる結果はログに出さないように調整が必要な場合も
+            # Truncate very large outputs before logging
             try:
                 result_repr = repr(result)
-                if len(result_repr) > 500: # 例: 500文字以上の結果は省略
-                   result_repr = result_repr[:500] + "..."
+                if len(result_repr) > 500:  # For example, shorten outputs longer than 500 chars
+                    result_repr = result_repr[:500] + "..."
                 self.logger.debug(f"Output: {result_repr}")
             except Exception:
-                 self.logger.debug("Output: [Could not represent result for logging]")
+                self.logger.debug("Output: [Could not represent result for logging]")
 
     def _log_error(self, method_name: str, error: Exception):
         self.logger.error(f"Error in {method_name}: {error}", exc_info=True)

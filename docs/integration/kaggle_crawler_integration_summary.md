@@ -73,7 +73,7 @@ uv run crawl4ai-doctor
 
 ### 2. Configure Kaggle API
 Place kaggle.json credentials file in:
-- Project root: `/Users/kenta.naruse/claude_code_projects/auto_kaggler/kaggle_crawler/kaggle.json`
+- Project root: `/path/to/project/kaggle_crawler/kaggle.json`
 - Or home directory: `~/.kaggle/kaggle.json`
 
 ### 3. Run the Crawler

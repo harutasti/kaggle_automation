@@ -2,7 +2,7 @@
 """
 Integration module for launching experiments using Codex.
 
-This replaces the WCA simulator with real Codex execution.
+This replaces the WAA simulator with real Codex execution.
 Can be used by ExperimentOrchestrator to launch real ML experiments.
 """
 

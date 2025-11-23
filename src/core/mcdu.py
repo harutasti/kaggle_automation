@@ -14,38 +14,38 @@ from ..data_models import CompetitionInfo, ExperimentHypothesis, ExperimentResul
 class MasterControllerDecisionUnit(BaseComponent):
     def __init__(self, config_path: str):
         self.config = self._load_config(config_path)
-        super().__init__(self.config) # BaseComponentの初期化
+        super().__init__(self.config)  # Initialize BaseComponent
 
-        # コンポーネントの初期化
+        # Initialize components
         self.kim = KaggleInterfaceManager(self.config)
         self.kse = KnowledgeStrategyEngine(self.config)
         self.eo = ExperimentOrchestrator(self.config)
         self.rad = ResultAggregatorDatabase(self.config)
         self.pa = PerformanceAnalyzer(self.config)
 
-        # 状態変数
+        # State variables
         self.current_iteration = 0
         self.max_iterations = self.config.get("max_iterations", 5)
         self.wca_per_iteration = self.config.get("wca_per_iteration", 3)
         self.competition_info: Optional[CompetitionInfo] = None
-        self.all_results: Dict[int, List[ExperimentResult]] = {} # {iteration: [results]}
+        self.all_results: Dict[int, List[ExperimentResult]] = {}  # {iteration: [results]}
         self.best_score_overall: Optional[float] = None
         self.best_experiment_id_overall: Optional[str] = None
         self.iterations_without_improvement = 0
         self.stop_reason: Optional[str] = None
 
-        # 停止条件の設定読み込み
+        # Load stop conditions
         stop_config = self.config.get("stop_condition", {})
         self.score_threshold = stop_config.get("score_threshold")
         self.no_improvement_threshold = stop_config.get("no_improvement_iterations", 3)
 
 
     def _load_config(self, config_path: str) -> dict:
-        """設定ファイルをロード"""
+        """Load configuration file."""
         try:
             with open(config_path, 'r', encoding='utf-8') as f:
                 config = json.load(f)
-            print(f"Configuration loaded from {config_path}") # logger初期化前なのでprint
+            print(f"Configuration loaded from {config_path}")  # Print since logger not yet initialized
             return config
         except FileNotFoundError:
             print(f"Error: Configuration file not found at {config_path}")
@@ -58,30 +58,30 @@ class MasterControllerDecisionUnit(BaseComponent):
             raise
 
     def run_main_loop(self):
-        """メインの実行ループ"""
+        """Main execution loop."""
         self._log_start("run_main_loop")
 
-        # 1. 初期化：コンペ情報取得＆データダウンロード
+        # 1. Initialization: fetch competition info & download data
         self.competition_info = self.kim.get_competition_info()
         if not self.competition_info:
             self.logger.critical("Failed to get competition info. Exiting.")
             return
         if not self.kim.download_data_files(self.competition_info):
-             self.logger.warning("Failed to download/verify data files. Continuing, but WCA might fail.")
-             # ここで停止する判断もあり
+             self.logger.warning("Failed to download/verify data files. Continuing, but WAA might fail.")
+             # Could decide to stop here
 
-        # 2. メインループ
+        # 2. Main loop
         while not self._should_stop():
             self.logger.info(f"--- Starting Iteration {self.current_iteration} ---")
 
-            # 2a. 仮説生成
+            # 2a. Generate hypotheses
             hypotheses = self._generate_hypotheses_for_iteration()
             if not hypotheses:
                  self.logger.warning(f"No hypotheses generated for iteration {self.current_iteration}. Stopping.")
                  self.stop_reason = "Hypothesis generation failed"
                  break
 
-            # 2b. 実験実行開始
+            # 2b. Launch experiments
             launched_ids = self.eo.launch_experiments(hypotheses)
             if not launched_ids:
                  self.logger.warning(f"No experiments were launched for iteration {self.current_iteration}. Stopping.")
@@ -89,12 +89,12 @@ class MasterControllerDecisionUnit(BaseComponent):
                  break
 
             running_experiments = set(launched_ids)
-            hypotheses_map = {h.experiment_id: h for h in hypotheses} # IDから仮説を引けるように
+            hypotheses_map = {h.experiment_id: h for h in hypotheses}  # Map ID -> hypothesis
 
-            # 2c. 実験完了待ち＆結果収集
+            # 2c. Wait for completion & collect results
             iteration_results = []
             while running_experiments:
-                time.sleep(10) # 10秒ごとにチェック
+                time.sleep(10)  # Check every 10 seconds
                 completed_ids = self.eo.check_running_experiments()
                 newly_completed = running_experiments.intersection(completed_ids)
 
@@ -104,17 +104,17 @@ class MasterControllerDecisionUnit(BaseComponent):
                          worktree_path = self.eo.get_worktree_path(exp_id)
                          result = self.rad.collect_result(exp_id, worktree_path)
                          if result:
-                              # RADに収集させた後、仮説情報でメタデータを更新
+                              # After RAD collects, update metadata with hypothesis
                               if exp_id in hypotheses_map:
                                    self.rad.update_result_metadata(exp_id, hypotheses_map[exp_id])
-                                   result = self.rad.get_result(exp_id) # 更新後の結果を再取得
+                                   result = self.rad.get_result(exp_id)  # Re-fetch after update
                                    iteration_results.append(result)
                               else:
                                    self.logger.error(f"Hypothesis not found for completed experiment {exp_id}!")
                          else:
                               self.logger.error(f"Failed to collect result for {exp_id}")
 
-                         # Worktreeのクリーンアップ
+                         # Clean up worktree
                          self.eo.cleanup_worktree(exp_id, worktree_path)
 
                      running_experiments -= newly_completed
@@ -122,23 +122,23 @@ class MasterControllerDecisionUnit(BaseComponent):
 
             self.all_results[self.current_iteration] = iteration_results
 
-            # 2d. パフォーマンス分析
+            # 2d. Performance analysis
             analysis_result = self.pa.analyze_results(self.current_iteration, iteration_results)
 
-            # 2e. 全体のベストスコア更新と改善チェック
+            # 2e. Update overall best and check improvement
             self._update_overall_best(analysis_result)
 
             self.current_iteration += 1
             self.logger.info(f"--- Finished Iteration {self.current_iteration - 1} ---")
-            # ループ終了条件チェックは次回のループ開始時に _should_stop で行われる
+            # Loop stop condition checked at start of next cycle
 
-        # 3. 終了処理
+        # 3. Finalization
         self.logger.info("Main loop finished.")
         self._final_reporting()
         self._log_end("run_main_loop")
 
     def _should_stop(self) -> bool:
-        """ループを停止すべきか判断する"""
+        """Decide whether to stop the main loop."""
         if self.stop_reason:
              self.logger.info(f"Stopping loop. Reason: {self.stop_reason}")
              return True
@@ -158,18 +158,18 @@ class MasterControllerDecisionUnit(BaseComponent):
              self.logger.info(self.stop_reason)
              return True
 
-        # TODO: 予算や残り時間などの条件も追加可能
+        # TODO: Add budget/time-based conditions
 
         return False
 
     def _generate_hypotheses_for_iteration(self) -> List[ExperimentHypothesis]:
-        """現在のイテレーションのための仮説を生成する"""
+        """Generate hypotheses for the current iteration."""
         if self.current_iteration == 0:
             return self.kse.generate_initial_hypotheses(self.competition_info, self.wca_per_iteration)
         else:
-            # 前回の分析結果と全結果履歴を渡す
+            # Pass prior analysis and all past results
             last_iteration = self.current_iteration - 1
-            last_analysis = self.pa.analyze_results(last_iteration, self.all_results.get(last_iteration, [])) # 再分析？or 保存したものを利用
+            last_analysis = self.pa.analyze_results(last_iteration, self.all_results.get(last_iteration, []))  # Re-analyze or use saved
             all_past_results = [res for iter_res in self.all_results.values() for res in iter_res]
             return self.kse.generate_next_hypotheses(self.competition_info,
                                                       self.current_iteration,
@@ -178,7 +178,7 @@ class MasterControllerDecisionUnit(BaseComponent):
                                                       all_past_results)
 
     def _update_overall_best(self, analysis_result: AnalysisResult):
-        """分析結果に基づき、全体のベストスコアを更新し、改善がなかった回数をカウント"""
+        """Update global best score and track iterations without improvement."""
         current_best_iter_score = analysis_result.best_score
         initial_best_score = self.best_score_overall
 
@@ -186,31 +186,31 @@ class MasterControllerDecisionUnit(BaseComponent):
             if self.best_score_overall is None or current_best_iter_score > self.best_score_overall:
                 self.best_score_overall = current_best_iter_score
                 self.best_experiment_id_overall = analysis_result.best_experiment_id
-                self.iterations_without_improvement = 0 # 改善したのでリセット
+                self.iterations_without_improvement = 0  # Reset because improved
                 self.logger.info(f"New overall best score: {self.best_score_overall:.4f} (Exp ID: {self.best_experiment_id_overall})")
             else:
-                 # スコアが同じか低い場合
-                 if initial_best_score is not None: # 初回イテレーションでない場合
+                 # Score stayed the same or decreased
+                 if initial_best_score is not None:  # Not the first iteration
                      self.iterations_without_improvement += 1
                      self.logger.info(f"Best score did not improve. Iterations without improvement: {self.iterations_without_improvement}")
         else:
-             # 今回のイテレーションで有効なスコアがなかった場合
-             if initial_best_score is not None: # 初回イテレーションでない場合
+             # No valid scores this iteration
+             if initial_best_score is not None:  # Not the first iteration
                  self.iterations_without_improvement += 1
                  self.logger.info(f"No valid score in this iteration. Iterations without improvement: {self.iterations_without_improvement}")
 
 
     def _final_reporting(self):
-        """最終結果のレポート"""
+        """Log the final results report."""
         self.logger.info("--- Final Report ---")
         if self.best_score_overall is not None:
             self.logger.info(f"Overall Best Score: {self.best_score_overall:.4f}")
             self.logger.info(f"Best Experiment ID: {self.best_experiment_id_overall}")
-            # 最良の結果の詳細を表示 (RADから取得)
+            # Display details of best result (from RAD)
             best_result = self.rad.get_result(self.best_experiment_id_overall)
             if best_result:
                  self.logger.info(f"Best Result Details: {best_result}")
-                 # ここで提出処理を呼び出す (今回はログ出力のみ)
+                 # Optionally submit here (logging only in current flow)
                  submission_file = next((f for f in best_result.result_files if 'submission' in f), None)
                  if submission_file:
                       submission_path_absolute = os.path.join(self.rad.results_base_dir, submission_file)

@@ -7,13 +7,13 @@ import logging
 logger = logging.getLogger('AutoKaggle')
 
 def ensure_dir(dir_path: str):
-    """ディレクトリが存在しない場合は作成する"""
+    """Create directory if it does not already exist."""
     if not os.path.exists(dir_path):
         os.makedirs(dir_path)
         logger.info(f"Created directory: {dir_path}")
 
 def write_json(data: Any, file_path: str):
-    """JSONデータをファイルに書き込む"""
+    """Write JSON data to a file."""
     ensure_dir(os.path.dirname(file_path))
     try:
         with open(file_path, 'w', encoding='utf-8') as f:
@@ -23,7 +23,7 @@ def write_json(data: Any, file_path: str):
         logger.error(f"Failed to write JSON to {file_path}: {e}")
 
 def read_json(file_path: str) -> Optional[Any]:
-    """JSONファイルを読み込む"""
+    """Read JSON data from a file."""
     if not os.path.exists(file_path):
         logger.warning(f"JSON file not found: {file_path}")
         return None
@@ -37,7 +37,7 @@ def read_json(file_path: str) -> Optional[Any]:
         return None
 
 def write_markdown(content: str, file_path: str):
-    """Markdownコンテンツをファイルに書き込む"""
+    """Write Markdown content to a file."""
     ensure_dir(os.path.dirname(file_path))
     try:
         with open(file_path, 'w', encoding='utf-8') as f:
@@ -47,7 +47,7 @@ def write_markdown(content: str, file_path: str):
         logger.error(f"Failed to write Markdown to {file_path}: {e}")
 
 def read_markdown(file_path: str) -> Optional[str]:
-    """Markdownファイルを読み込む"""
+    """Read Markdown content from a file."""
     if not os.path.exists(file_path):
         logger.warning(f"Markdown file not found: {file_path}")
         return None
@@ -61,16 +61,16 @@ def read_markdown(file_path: str) -> Optional[str]:
         return None
 
 def copy_file(src: str, dst: str):
-    """ファイルをコピーする"""
+    """Copy a file."""
     ensure_dir(os.path.dirname(dst))
     try:
-        shutil.copy2(src, dst) # メタデータもコピー
+        shutil.copy2(src, dst)  # Copy metadata as well
         logger.debug(f"Copied file from {src} to {dst}")
     except Exception as e:
         logger.error(f"Failed to copy file from {src} to {dst}: {e}")
 
 def move_file(src: str, dst: str):
-    """ファイルを移動する"""
+    """Move a file."""
     ensure_dir(os.path.dirname(dst))
     try:
         shutil.move(src, dst)
@@ -79,7 +79,7 @@ def move_file(src: str, dst: str):
         logger.error(f"Failed to move file from {src} to {dst}: {e}")
 
 def remove_dir(dir_path: str):
-    """ディレクトリとその中身を削除する"""
+    """Remove a directory and its contents."""
     if os.path.exists(dir_path):
         try:
             shutil.rmtree(dir_path)

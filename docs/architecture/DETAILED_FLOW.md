@@ -18,7 +18,7 @@ graph TD
     
     I --> J[Generate Hypotheses with Insights]
     J --> K[Launch Parallel Experiments]
-    K --> L[Monitor WCA Processes]
+    K --> L[Monitor WAA Processes]
     L --> M{All Experiments Complete?}
     M -->|No| L
     M -->|Yes| N[Collect Results]
@@ -153,15 +153,15 @@ sequenceDiagram
     participant MCDU as Master Controller
     participant EO as Experiment Orchestrator
     participant Git as Git Worktrees
-    participant WCA as Worker Agent Processes
+    participant WAA as Worker Agent Processes
     
     MCDU->>EO: execute_experiments(hypotheses_list)
     
     loop For each hypothesis
         EO->>Git: Create isolated worktree
         Git-->>EO: Return worktree path
-        EO->>WCA: Launch wca_simulator.py process
-        Note over WCA: Process runs independently
+        EO->>WAA: Launch wca_simulator.py process
+        Note over WAA: Process runs independently
     end
     
     EO->>EO: Track active processes
@@ -182,7 +182,7 @@ sequenceDiagram
 
 ```mermaid
 graph TD
-    A[WCA Process Starts] --> B[Setup Local Logger]
+    A[WAA Process Starts] --> B[Setup Local Logger]
     B --> C[Read Task Markdown]
     C --> D[Parse Instructions]
     D --> E[Simulate ML Work]
@@ -335,7 +335,7 @@ experiments/
 ```mermaid
 graph TD
     A[Error Occurs] --> B{Error Level}
-    B -->|WCA Process Error| C[Write ERROR file]
+    B -->|WAA Process Error| C[Write ERROR file]
     C --> D[Mark experiment as FAILED]
     D --> E[Continue with other experiments]
     
@@ -366,7 +366,7 @@ graph LR
     C --> J[EO Process Management]
     D --> K[MCDU Decision Logic]
     E --> L[KIM Submission Behavior]
-    E --> M[WCA Simulation Level]
+    E --> M[WAA Simulation Level]
     F --> N[KIM Data Source Selection]
     F --> O[KSE Strategy Discovery]
     G --> P[Crawler Discussion Limit]

@@ -4,7 +4,7 @@ An automated machine learning system that simulates autonomous participation in 
 
 ## Overview
 
-AutoKaggle is a sophisticated simulation framework designed to model how AI agents could autonomously compete in machine learning competitions. The system orchestrates multiple "Worker Claude Agents" (WCAs) that execute different experimental strategies in parallel, analyze results, and iteratively improve performance.
+AutoKaggle is a sophisticated simulation framework designed to model how AI agents could autonomously compete in machine learning competitions. The system orchestrates multiple Worker AI Agents (WAAs) that execute different experimental strategies in parallel, analyze results, and iteratively improve performance.
 
 ## Architecture
 
@@ -37,8 +37,8 @@ The system uses structured dataclasses for consistent data flow:
 
 ### Parallel Experiment Execution
 - Creates isolated Git worktrees for each experiment
-- Runs multiple Worker Claude Agents simultaneously
-- Each WCA operates independently with its own workspace and logging
+- Runs multiple Worker AI Agents simultaneously
+- Each WAA operates independently with its own workspace and logging
 
 ### Intelligent Strategy Generation
 - Analyzes competition requirements and generates appropriate ML strategies
@@ -104,7 +104,7 @@ auto_kaggler/
 1. **Initialization**: MCDU loads configuration and initializes all components
 2. **Competition Setup**: KIM retrieves competition information and data
 3. **Strategy Generation**: KSE analyzes competition and generates experimental hypotheses
-4. **Parallel Execution**: EO creates isolated workspaces and launches multiple WCAs
+4. **Parallel Execution**: EO creates isolated workspaces and launches multiple WAAs
 5. **Result Collection**: RAD aggregates results from completed experiments
 6. **Analysis**: PA analyzes iteration results and provides recommendations
 7. **Decision**: MCDU decides whether to continue or stop based on performance
@@ -121,7 +121,7 @@ The system is currently in simulation mode, generating realistic but dummy data 
 
 ## Future Enhancements
 
-When connected to real Kaggle APIs and Claude Code agents, the system could:
+When connected to real Kaggle APIs and Codex/other AI agents, the system could:
 
 - Download actual competition data and requirements
 - Execute real ML experiments with proper model training

@@ -13,7 +13,7 @@ class PerformanceAnalyzer(BaseComponent):
         ensure_dir(self.analysis_dir)
 
     def analyze_results(self, iteration: int, results: List[ExperimentResult]) -> AnalysisResult:
-        """指定されたイテレーションの結果と過去の結果を分析する"""
+        """Analyze the current iteration's results (and optionally prior ones)."""
         method_name = "analyze_results"
         self._log_start(method_name, iteration=iteration, num_results=len(results))
 
@@ -32,7 +32,7 @@ class PerformanceAnalyzer(BaseComponent):
             self._log_end(method_name, analysis)
             return analysis
 
-        # --- 簡単な分析ロジック ---
+        # --- Simple analysis logic ---
         successful_results = [r for r in results if r.status == "SUCCESS" and r.score is not None]
         failed_results = [r for r in results if r.status != "SUCCESS"]
 
@@ -40,26 +40,24 @@ class PerformanceAnalyzer(BaseComponent):
         best_exp_id_current_iter = None
         scores = []
         if successful_results:
-            successful_results.sort(key=lambda r: r.score, reverse=True) # スコアで降順ソート
+            successful_results.sort(key=lambda r: r.score, reverse=True)  # Sort by score (desc)
             best_exp_current_iter = successful_results[0]
             best_score_current_iter = best_exp_current_iter.score
             best_exp_id_current_iter = best_exp_current_iter.experiment_id
             scores = [r.score for r in successful_results]
             self.logger.info(f"Best score in iteration {iteration}: {best_score_current_iter:.4f} (Exp ID: {best_exp_id_current_iter})")
 
-        # 改善傾向の判断（仮：前のイテレーションのベストと比較、ただし全履歴が必要）
-        # このためにはRADから全履歴を取得する必要がある
-        # all_results = rad.get_all_results() # RADインスタンスが必要
-        improvement_trend = "N/A" # TODO: 実装
+        # Improvement trend (placeholder: would need full history from RAD)
+        # all_results = rad.get_all_results()  # RAD instance required
+        improvement_trend = "N/A"  # TODO: implement
 
-        # 次の戦略の推奨（仮：成功した戦略と、失敗しなかった戦略をリストアップ）
+        # Recommend next strategies: prioritize successes and those not yet failing
         successful_strategies = set(r.strategy_name for r in successful_results)
         failed_strategies = set(r.strategy_name for r in failed_results)
         recommended_strategies = list(successful_strategies) + [s for s in list(set(r.strategy_name for r in results)) if s not in failed_strategies and s not in successful_strategies]
-        # スコアが良い戦略を優先するロジックなども追加可能
-        # 新しい戦略を試す、といったロジックもここに入れる
+        # Could add: weight by score, try new strategies, etc.
 
-        # --- 分析レポートMarkdown生成 ---
+        # --- Build analysis markdown ---
         summary_md = f"# Analysis Report - Iteration {iteration}\n\n"
         summary_md += f"Date: {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n"
         summary_md += f"## Overview\n"
@@ -78,8 +76,8 @@ class PerformanceAnalyzer(BaseComponent):
 
         if failed_results:
             summary_md += f"## Failures\n"
-            for fr in failed_results[:5]: # 上位5件まで表示
-                summary_md += f"- {fr.experiment_id} ({fr.strategy_name}): Status={fr.status}\n" # Error messageも表示すると良い
+            for fr in failed_results[:5]:  # Show top 5 failures
+                summary_md += f"- {fr.experiment_id} ({fr.strategy_name}): Status={fr.status}\n"  # Could include error messages
             if len(failed_results) > 5:
                 summary_md += "- ... (and more)\n"
             summary_md += "\n"
@@ -98,7 +96,7 @@ class PerformanceAnalyzer(BaseComponent):
 
         analysis = AnalysisResult(
             iteration=iteration,
-            summary_markdown=summary_md, # ファイルパスでも良いかもしれない
+            summary_markdown=summary_md,  # Could store as file path instead
             best_score=best_score_current_iter,
             best_experiment_id=best_exp_id_current_iter,
             improvement_trend=improvement_trend,

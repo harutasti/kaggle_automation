@@ -24,7 +24,6 @@ Located in `integration/`:
 ## Quick Links
 
 - [Main README](../README.md) - Project setup and basic usage
-- [CLAUDE.md](../CLAUDE.md) - Instructions for Claude Code
 - [Configuration](../config/config.json) - System configuration settings
 
 ## Documentation Overview
@@ -35,9 +34,8 @@ Located in `integration/`:
 3. Follow setup in the main [README.md](../README.md)
 
 ### For Developers
-1. Read [CLAUDE.md](../CLAUDE.md) for development guidelines
-2. Study [DETAILED_FLOW.md](architecture/DETAILED_FLOW.md) for system internals
-3. Check [file_descriptions.md](architecture/file_descriptions.md) for component details
+1. Study [DETAILED_FLOW.md](architecture/DETAILED_FLOW.md) for system internals
+2. Check [file_descriptions.md](architecture/file_descriptions.md) for component details
 
 ### For Integration
 1. Follow [INTEGRATION_GUIDE.md](guides/INTEGRATION_GUIDE.md)

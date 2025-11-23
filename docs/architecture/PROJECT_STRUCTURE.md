@@ -5,7 +5,6 @@
 ```
 auto_kaggler/
 ├── README.md                    # Project overview and setup instructions
-├── CLAUDE.md                    # Instructions for Claude Code
 ├── main.py                      # Entry point for the application
 ├── config.json                  # System configuration
 ├── data_models.py               # Data structure definitions
@@ -20,7 +19,7 @@ auto_kaggler/
 │   ├── eo.py                    # Experiment Orchestrator
 │   ├── rad.py                   # Result Aggregator Database
 │   ├── pa.py                    # Performance Analyzer
-│   └── wca_simulator.py         # Worker Claude Agent Simulator
+│   └── wca_simulator.py         # Worker AI Agent Simulator
 │
 ├── utils/                       # Utility modules
 │   ├── file_utils.py            # File system operations
@@ -31,7 +30,6 @@ auto_kaggler/
 │   ├── crawl_kaggle_competition.py
 │   ├── crawl_discussions.py
 │   ├── pyproject.toml
-│   ├── CLAUDE.md
 │   └── README.md
 │
 │
@@ -73,7 +71,7 @@ Shared utility functions for file operations, logging, and data parsing.
 Kaggle web scraping and data collection module, now fully integrated as part of the core system.
 
 ### `/docs`
-All project documentation except README.md and CLAUDE.md (which remain in root for visibility).
+All project documentation.
 
 ### `/experiments`
 Runtime-generated data from ML experiments. This directory is created automatically and contains:

@@ -42,7 +42,7 @@ class KnowledgeStrategyEngine(BaseComponent):
                             self.strategies.append("EnsembleBlend")
 
     def generate_initial_hypotheses(self, competition_info: CompetitionInfo, num_hypotheses: int) -> List[ExperimentHypothesis]:
-        """初期の実験仮説を生成する"""
+        """Generate initial experiment hypotheses."""
         method_name = "generate_initial_hypotheses"
         self._log_start(method_name, num_hypotheses=num_hypotheses)
         
@@ -78,27 +78,27 @@ class KnowledgeStrategyEngine(BaseComponent):
                                  num_hypotheses: int,
                                  analysis_result: Optional[AnalysisResult],
                                  previous_results: List[ExperimentResult]) -> List[ExperimentHypothesis]:
-        """分析結果と過去の結果に基づき、次の実験仮説を生成する"""
+        """Generate the next set of hypotheses based on analysis and past results."""
         method_name = "generate_next_hypotheses"
         self._log_start(method_name, iteration=current_iteration, num_hypotheses=num_hypotheses)
         hypotheses = []
 
-        # 分析結果や過去の結果を考慮した戦略選択（シミュレーションではランダム＋α）
-        possible_strategies = self.strategies[:] # コピーを作成
+        # Choose strategies based on analysis/history (simulation uses random + tweaks)
+        possible_strategies = self.strategies[:]  # Make a copy
         if analysis_result and analysis_result.recommended_strategies:
-            # 推奨戦略を優先的に選択
+            # Prioritize recommended strategies
             possible_strategies = analysis_result.recommended_strategies + [s for s in self.strategies if s not in analysis_result.recommended_strategies]
             self.logger.info(f"Prioritizing recommended strategies: {analysis_result.recommended_strategies}")
 
         if previous_results:
-             # スコアが良かった戦略のパラメータを微調整する仮説なども生成できる（今回は省略）
+             # Could generate hypotheses that fine-tune successful strategies (omitted)
              pass
 
         for i in range(num_hypotheses):
             exp_id = f"iter{current_iteration}_exp{i+1}_{uuid.uuid4().hex[:6]}"
-            # 戦略を選択（推奨があればそれを優先、なければランダム）
+            # Select strategy (prioritize recommendations; otherwise rotate)
             strategy = possible_strategies[i % len(possible_strategies)]
-            params = self._get_dummy_params(strategy, previous_results) # パラメータも過去の結果から調整可能
+            params = self._get_dummy_params(strategy, previous_results)  # Could adjust params using past results
             task_md_path = os.path.join(self.hypothesis_dir, f"{exp_id}_task.md")
 
             task_markdown = self._generate_task_markdown(exp_id, current_iteration, strategy, params, competition_info)
@@ -118,11 +118,11 @@ class KnowledgeStrategyEngine(BaseComponent):
         return hypotheses
 
     def _get_dummy_params(self, strategy: str, previous_results: Optional[List[ExperimentResult]] = None) -> dict:
-        """戦略に応じたダミーパラメータを生成"""
+        """Generate placeholder parameters based on strategy."""
         if "GBM" in strategy or "LightGBM" in strategy:
             lr = random.uniform(0.01, 0.1)
             n_estimators = random.randint(100, 1000)
-            # 過去の結果があれば、良いスコアのパラメータを中心に探索するなど調整可能
+            # Could bias toward parameters from strong past results
             return {"learning_rate": round(lr, 4), "n_estimators": n_estimators, "feature_set": "basic"}
         elif "XGBoost" in strategy:
             return {"learning_rate": round(random.uniform(0.01, 0.3), 4), 
@@ -148,7 +148,7 @@ class KnowledgeStrategyEngine(BaseComponent):
             return {"param1": "dummy", "param2": random.randint(1, 10)}
 
     def _generate_task_markdown(self, exp_id: str, iteration: int, strategy: str, params: dict, comp_info: CompetitionInfo) -> str:
-        """WCA向けのタスク指示Markdownを生成"""
+        """Generate task markdown for the WAA."""
         
         # Find relevant discussion insights for this strategy
         relevant_insights = []
@@ -174,7 +174,7 @@ Based on discussion analysis, here are relevant insights for this strategy:
 {chr(10).join(f"- {insight}" for insight in relevant_insights[:3])}
 ''' if relevant_insights else ''}
 
-## Instructions for Claude Code Agent (WCA)
+## Instructions for AI Agent (WAA)
 
 1.  **Understand the Goal:** The primary goal is to train a model using the '{strategy}' approach with the specified parameters and evaluate it using the '{comp_info.evaluation_metric}' metric.
 2.  **Load Data:** Load the necessary data files: {', '.join(comp_info.data_files)}. Assume they are available in the standard data directory relative to the worktree root.
@@ -191,7 +191,7 @@ Based on discussion analysis, here are relevant insights for this strategy:
     *   Save the trained model (optional, if needed later).
     *   Save the validation/CV score to `result_{exp_id}.json` in the worktree root (format: `{{"score": <score_value>}}`).
     *   Save the test predictions to `submission_{exp_id}.csv` in the format required by the competition.
-    *   Log key steps and results to `wca_{exp_id}.log`.
+    *   Log key steps and results to `waa_{exp_id}.log`.
 7.  **Final Step:** Create a file named `DONE_{exp_id}` in the worktree root to signal completion.
 
 **Important:** Ensure all file paths for output are relative to the root of this Git worktree. Use the provided `experiment_id` (`{exp_id}`) in filenames.

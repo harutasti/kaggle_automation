@@ -25,7 +25,7 @@ graph TB
 
     MainLoop --> GenHypothesis[仮説生成<br/>KSE]
     GenHypothesis --> LaunchExp[実験並列実行<br/>EO]
-    LaunchExp --> Monitor[WCAプロセス監視]
+    LaunchExp --> Monitor[WAAプロセス監視]
 
     Monitor --> CheckComplete{全実験完了?}
     CheckComplete -->|No| Monitor
@@ -71,9 +71,9 @@ graph LR
 
     subgraph "実行管理"
         EO[EO<br/>実験<br/>オーケストレーター]
-        WCA1[WCA-1]
-        WCA2[WCA-2]
-        WCA3[WCA-3]
+        WAA1[WAA-1]
+        WAA2[WAA-2]
+        WAA3[WAA-3]
     end
 
     subgraph "外部連携"
@@ -90,9 +90,9 @@ graph LR
     KIM --> Crawler
     KIM --> KaggleAPI
 
-    EO --> WCA1
-    EO --> WCA2
-    EO --> WCA3
+    EO --> WAA1
+    EO --> WAA2
+    EO --> WAA3
 
     KSE --> RAD
     PA --> RAD
@@ -200,9 +200,9 @@ graph TD
 
     LaunchPhase --> CreateWorktree[Gitワークツリー作成]
     CreateWorktree --> CopyTask[タスクファイル配置]
-    CopyTask --> StartWCA[WCAプロセス起動]
+    CopyTask --> StartWAA[WAAプロセス起動]
 
-    StartWCA --> MonitorPhase[監視フェーズ]
+    StartWAA --> MonitorPhase[監視フェーズ]
     MonitorPhase --> CheckDone{DONE/ERRORファイル?}
     CheckDone -->|未検出| Sleep[10秒待機]
     Sleep --> CheckDone
@@ -243,11 +243,11 @@ graph TD
 
 ---
 
-## 5. WCA（Worker Claude Agent）実行フロー
+## 5. WAA（Worker Agent）実行フロー
 
 ```mermaid
 graph TD
-    WCAStart[WCAプロセス起動] --> SetupLogger[ローカルロガー設定]
+    WAAStart[WAAプロセス起動] --> SetupLogger[ローカルロガー設定]
     SetupLogger --> ReadTask[task.md読み込み]
     ReadTask --> ParseInstruction[指示解析]
 
@@ -273,7 +273,7 @@ graph TD
     WriteSummary --> WriteSuccess[DONE_SUCCESS_*.txtマーカー作成]
     WriteSuccess --> ExitSuccess[正常終了]
 
-    style WCAStart fill:#ccffcc
+    style WAAStart fill:#ccffcc
     style SimFailure fill:#ffcccc
     style WriteSuccess fill:#ccffff
     style ExitSuccess fill:#ccffcc
@@ -322,10 +322,10 @@ graph LR
 
     EO --> Worktrees
     EO --> TaskMD
-    TaskMD --> WCA
-    KaggleFiles --> WCA
+    TaskMD --> WAA
+    KaggleFiles --> WAA
 
-    WCA --> ResultFiles
+    WAA --> ResultFiles
     ResultFiles --> RAD
     RAD --> Results
     Results --> ResultsJSON
@@ -341,7 +341,7 @@ graph LR
     style KIM fill:#99ccff
     style KSE fill:#ffcc99
     style EO fill:#cc99ff
-    style WCA fill:#99ff99
+    style WAA fill:#99ff99
     style RAD fill:#99ff99
     style PA fill:#ffff99
 ```
@@ -497,8 +497,8 @@ stateDiagram-v2
     GeneratingHypothesis --> Iterating: 仮説生成失敗
     GeneratingHypothesis --> LaunchingExperiments: 仮説生成成功
 
-    LaunchingExperiments --> RunningExperiments: WCA起動成功
-    LaunchingExperiments --> Iterating: WCA起動失敗
+    LaunchingExperiments --> RunningExperiments: WAA起動成功
+    LaunchingExperiments --> Iterating: WAA起動失敗
 
     RunningExperiments --> RunningExperiments: 実験実行中
     RunningExperiments --> CollectingResults: 全実験完了
@@ -518,7 +518,7 @@ stateDiagram-v2
     end note
 
     note right of RunningExperiments
-        複数WCAが並列実行
+        複数WAAが並列実行
         Gitワークツリー使用
     end note
 
@@ -688,7 +688,7 @@ graph TD
 
 1. **初期化**: 全コンポーネントを初期化し、Kaggleクローラーでコンペデータを取得
 2. **イテレーション**: 仮説生成 → 並列実験 → 結果収集 → 分析 → 意思決定のサイクル
-3. **並列実行**: Gitワークツリーを使用して複数WCAを独立した環境で同時実行
+3. **並列実行**: Gitワークツリーを使用して複数WAAを独立した環境で同時実行
 4. **学習機構**: 前イテレーションの結果を分析し、次の仮説生成に反映
 5. **適応的停止**: スコア閾値、改善停滞、最大イテレーション数による自動停止
 
@@ -705,7 +705,7 @@ graph TD
 | パラメータ | 説明 | デフォルト |
 |----------|------|----------|
 | max_iterations | 最大イテレーション数 | 5 |
-| wca_per_iteration | イテレーション毎のWCA数 | 3 |
+| wca_per_iteration | イテレーション毎のWAA数 | 3 |
 | score_threshold | 目標スコア閾値 | 0.95 |
 | no_improvement_iterations | 改善なし許容回数 | 2 |
 | simulation_mode | シミュレーションモード | true |

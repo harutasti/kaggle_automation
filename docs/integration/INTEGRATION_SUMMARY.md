@@ -30,7 +30,7 @@ The kaggle_crawler has been successfully integrated into the auto_kaggler projec
 - Added discussion strategy loading via `_load_discussion_strategies()`
 - Dynamically adds strategies found in discussions (e.g., XGBoost_FromDiscussion)
 - Enhanced parameter generation for new strategy types
-- Includes relevant discussion insights in task markdown for WCAs
+- Includes relevant discussion insights in task markdown for WAAs
 
 ### 4. **Configuration Updates**
 - Added `use_crawler: true` to enable crawler integration
@@ -71,7 +71,7 @@ uv run python kaggle_crawler/crawl_kaggle_competition.py <competition_id> --forc
 2. If not found, runs crawler automatically
 3. Parses competition info and discussion strategies
 4. KSE uses strategies to generate experiments
-5. WCAs receive task instructions with community insights
+5. WAAs receive task instructions with community insights
 
 ## Benefits
 
@@ -86,7 +86,7 @@ uv run python kaggle_crawler/crawl_kaggle_competition.py <competition_id> --forc
 1. **Better Strategy Extraction**: Use NLP to extract more detailed strategy parameters
 2. **Feature Engineering Insights**: Parse specific feature ideas from discussions
 3. **Leaderboard Analysis**: Use leaderboard data to identify winning approaches
-4. **Real WCA Integration**: Replace simulators with actual Claude Code agents
+4. **Real WAA Integration**: Replace simulators with actual Codex/AI agents
 5. **Submission Tracking**: Monitor actual Kaggle leaderboard positions
 
 The integration provides a solid foundation for transitioning from simulation to real Kaggle competition participation while leveraging community knowledge for better performance.

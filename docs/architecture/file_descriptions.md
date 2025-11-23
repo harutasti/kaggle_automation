@@ -72,28 +72,28 @@ Role: Strategy Brain. Responsible for analyzing information and generating exper
 Expected Behavior:
 Receives CompetitionInfo from KIM (via MCDU).
 (Simulation): Generates initial hypotheses randomly selecting from predefined strategies (SimpleGBM, BasicNN, etc.) and generating dummy parameters. For subsequent iterations, it receives simulated AnalysisResult and ExperimentResult lists and might slightly bias strategy selection (e.g., prioritizing "recommended" strategies from the dummy analysis) before generating new hypotheses with dummy parameters.
-Generates task instruction Markdown files (task_N.md) for each hypothesis, detailing the (simulated) work the WCA should perform. These files are saved in experiments/hypotheses/.
+Generates task instruction Markdown files (task_N.md) for each hypothesis, detailing the (simulated) work the WAA should perform. These files are saved in experiments/hypotheses/.
 (Real Implementation): Would involve more sophisticated logic, potentially using NLP to parse real competition descriptions and discussions, analyzing past experiment results more deeply to guide parameter tuning (e.g., Bayesian optimization), and employing more complex strategy selection rules.
 
 9. components/eo.py (Experiment Orchestrator)
 
-Role: Experiment Execution Manager. Manages the lifecycle of experiments and Worker Claude Agents (WCAs).
+Role: Experiment Execution Manager. Manages the lifecycle of experiments and Worker AI Agents (WAAs).
 
 Expected Behavior:
 Receives a list of ExperimentHypothesis from KSE (via MCDU).
 Uses the GitPython library to create a unique Git worktree (experiments/worktrees/exp_id/) for each hypothesis, branching off the main repository.
 Starts a separate Python process for each experiment using multiprocessing, running the wca_simulator.py script within its designated worktree and passing necessary arguments (worktree path, task markdown path, experiment ID).
-Keeps track of active WCA simulator processes.
-Periodically checks for the completion of WCA processes (by looking for a DONE_exp_id file within the worktree).
+Keeps track of active WAA simulator processes.
+Periodically checks for the completion of WAA processes (by looking for a DONE_exp_id file within the worktree).
 Cleans up completed worktrees (removes the directory and prunes Git worktree information).
 
-10. components/wca_simulator.py (Worker Claude Agent Simulator)
+10. components/wca_simulator.py (Worker Agent Simulator)
 
-Role: Worker Agent Simulation. Simulates the behavior of a Claude Code agent executing a single experiment task. This runs as an independent process.
+Role: Worker Agent Simulation. Simulates the behavior of an AI agent executing a single experiment task. This runs as an independent process.
 
 Expected Behavior:
 Receives arguments (worktree path, task markdown path, experiment ID) from the EO.
-Sets up its own local logger, writing logs to a file within its worktree (wca_exp_id.log).
+Sets up its own local logger, writing logs to a file within its worktree (waa_exp_id.log).
 Reads the task markdown file (simulating understanding instructions).
 Simulates work by pausing for a random duration (time.sleep).
 Generates a random dummy score and simulates potential failures (with a small probability).
@@ -134,7 +134,7 @@ Runs the main control loop:
 Calls KIM to get competition info and download data (simulated).
 In each iteration:
 Calls KSE to generate hypotheses.
-Calls EO to launch experiments (start WCA processes).
+Calls EO to launch experiments (start WAA processes).
 Waits for EO to report completed experiments.
 Instructs RAD to collect results for completed experiments.
 Updates RAD results with metadata from KSE's hypotheses.

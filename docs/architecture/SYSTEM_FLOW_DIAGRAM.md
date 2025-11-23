@@ -23,14 +23,9 @@ flowchart TB
     Crawler --> CompData[Competition Data]
     KaggleAPI --> CompData
     
-    CompData --> ClaudeCheck{Claude Enabled?}
-    ClaudeCheck -->|Yes| ClaudeAnalysis[Claude Code Analysis]
-    ClaudeCheck -->|No| ParseData[Parse Competition Info]
-    
-    ClaudeAnalysis --> EnhancedInfo[Enhanced Competition Info]
-    ParseData --> BasicInfo[Basic Competition Info]
-    EnhancedInfo --> KSE[KnowledgeStrategyEngine]
-    BasicInfo --> KSE
+    CompData --> ParseData[Parse Competition Info]
+    ParseData --> CompInfo[Competition Info]
+    CompInfo --> KSE[KnowledgeStrategyEngine]
     
     %% Strategy Generation
     KSE --> GenStrat[Generate Strategies]
@@ -41,12 +36,12 @@ flowchart TB
     EO --> CreateWorktree[Create Git Worktree]
     CreateWorktree --> ExpLoop{For each experiment}
     
-    ExpLoop --> WCACheck{Use Claude Code?}
-    WCACheck -->|Yes| ClaudeExp[Claude Code Executor]
-    WCACheck -->|No| WCA[WCASimulator]
+    ExpLoop --> ExecCheck{Execution Mode}
+    ExecCheck -->|Codex| CodexExp[Codex Executor]
+    ExecCheck -->|Simulation| WAA[WAASimulator]
     
-    ClaudeExp --> ExpResult[Experiment Result]
-    WCA --> ExpResult
+    CodexExp --> ExpResult[Experiment Result]
+    WAA --> ExpResult
     
     ExpResult --> RAD[ResultAggregatorDatabase]
     RAD --> MoreExp{More experiments?}
@@ -68,9 +63,9 @@ flowchart TB
     classDef data fill:#e8f5e9,stroke:#1b5e20,stroke-width:2px
     
     class MCDU,KIM,KSE,EO,RAD,PA component
-    class Crawler,KaggleAPI,ClaudeAnalysis,ClaudeExp,WCA external
-    class CheckIter,CrawlerCheck,ClaudeCheck,WCACheck,ExpLoop,MoreExp,CheckStop decision
-    class CompData,EnhancedInfo,BasicInfo,Strategies,ExpResult,Analysis data
+    class Crawler,KaggleAPI,CodexExp,WAA external
+    class CheckIter,CrawlerCheck,ExecCheck,ExpLoop,MoreExp,CheckStop decision
+    class CompData,CompInfo,Strategies,ExpResult,Analysis data
 ```
 
 ## Component Interactions
@@ -88,7 +83,7 @@ graph LR
     
     subgraph External Services
         Kaggle[Kaggle API]
-        Claude[Claude Code]
+        Codex[Codex Executor]
         Git[Git Worktrees]
     end
     
@@ -101,7 +96,6 @@ graph LR
     
     MCDU -->|requests| KIM
     KIM -->|fetches from| Kaggle
-    KIM -->|analyzes with| Claude
     KIM -->|produces| CompInfo
     
     CompInfo -->|feeds| KSE
@@ -109,7 +103,7 @@ graph LR
     
     ExpHyp -->|executed by| EO
     EO -->|uses| Git
-    EO -->|may use| Claude
+    EO -->|may use| Codex
     EO -->|produces| Results
     
     Results -->|stored in| RAD
@@ -147,13 +141,7 @@ flowchart LR
     CrawlerPath --> ParseInfo[Parse Competition Info]
     APIPath --> ParseInfo
     
-    ParseInfo --> ClaudeAnalysis{Claude enabled?}
-    ClaudeAnalysis -->|Yes| RunClaude[Run Claude Analysis]
-    ClaudeAnalysis -->|No| ReturnBasic[Return Basic Info]
-    
-    RunClaude --> EnhanceInfo[Enhance Competition Info]
-    EnhanceInfo --> Return([Return Enhanced Info])
-    ReturnBasic --> Return
+    ParseInfo --> Return([Return Competition Info])
 ```
 
 ### 2. Experiment Execution Flow
@@ -166,24 +154,24 @@ flowchart TB
     Loop -->|Next| CreateBranch[Create Git Worktree]
     
     CreateBranch --> PrepareTask[Prepare Task Markdown]
-    PrepareTask --> ExecutorChoice{Claude Code enabled?}
+    PrepareTask --> ExecutorChoice{Execution Mode?}
     
-    ExecutorChoice -->|Yes| ClaudePath
-    ExecutorChoice -->|No| WCAPath
+    ExecutorChoice -->|Codex| CodexPath
+    ExecutorChoice -->|Simulation| WAAPath
     
-    subgraph ClaudePath [Claude Code Path]
+    subgraph CodexPath [Codex Path]
         PreparePrompt[Prepare Detailed Prompt]
-        PreparePrompt --> CallClaude[Execute via ClaudeCodeWrapper]
-        CallClaude --> ParseResponse[Parse Claude Response]
+        PreparePrompt --> CallCodex[Execute via Codex Executor]
+        CallCodex --> ParseResponse[Parse Codex Response]
     end
     
-    subgraph WCAPath [WCA Simulator Path]
+    subgraph WAAPath [WAA Simulator Path]
         SimulateWork[Simulate ML Work]
         SimulateWork --> GenerateResults[Generate Mock Results]
     end
     
-    ClaudePath --> CollectResults[Collect Results]
-    WCAPath --> CollectResults
+    CodexPath --> CollectResults[Collect Results]
+    WAAPath --> CollectResults
     
     CollectResults --> StoreRAD[Store in RAD]
     StoreRAD --> CleanupWorktree[Cleanup Worktree]
@@ -210,12 +198,7 @@ flowchart LR
     ClassStrategies --> Combine
     DefaultStrategies --> Combine
     
-    Combine --> ApplyInsights{Claude Insights?}
-    ApplyInsights -->|Yes| EnhanceWithClaude[Enhance with Claude Suggestions]
-    ApplyInsights -->|No| BasicStrategies[Use Basic Strategies]
-    
-    EnhanceWithClaude --> FilterDuplicates[Filter Duplicates]
-    BasicStrategies --> FilterDuplicates
+    Combine --> FilterDuplicates[Filter Duplicates]
     
     FilterDuplicates --> Return([Return Strategy List])
 ```
@@ -327,11 +310,11 @@ flowchart LR
 ## Key Features
 
 1. **Modular Architecture**: Each component has a single responsibility
-2. **External Service Integration**: Kaggle API, Claude Code, Git
+2. **External Service Integration**: Kaggle API, Codex, Git
 3. **Fallback Mechanisms**: Simulation mode when APIs fail
 4. **Iterative Improvement**: Feedback loop from analysis to strategy generation
 5. **Experiment Isolation**: Git worktrees for clean experiment environments
-6. **Flexible Execution**: Support for both Claude Code and simulation
+6. **Flexible Execution**: Support for both Codex and simulation
 
 ## Usage
 

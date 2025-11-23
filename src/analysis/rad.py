@@ -16,23 +16,23 @@ class ResultAggregatorDatabase(BaseComponent):
         self.results_cache: Dict[str, ExperimentResult] = self._load_manifest()
 
     def _load_manifest(self) -> Dict[str, ExperimentResult]:
-        """マニフェストファイルから結果をロード"""
+        """Load results from the manifest file."""
         manifest_data = read_json(self.manifest_file)
         cache = {}
         if manifest_data:
-            # JSONからExperimentResultオブジェクトに変換（簡易版）
-            # 本格的にはdataclasses-jsonなどを使うと良い
+            # Convert JSON into ExperimentResult objects (simple approach)
+            # A robust approach would use dataclasses-json, etc.
             for exp_id, data in manifest_data.items():
                  try:
-                     # 日付時刻文字列をdatetimeオブジェクトに変換
+                     # Convert datetime strings to datetime objects
                      data['start_time'] = datetime.datetime.fromisoformat(data['start_time']) if data.get('start_time') else None
                      data['end_time'] = datetime.datetime.fromisoformat(data['end_time']) if data.get('end_time') else None
-                     # execution_time_seconds がない場合やNoneの場合の処理
+                     # Derive execution_time_seconds if missing/None
                      if 'execution_time_seconds' not in data or data['execution_time_seconds'] is None:
                          if data.get('start_time') and data.get('end_time'):
                             data['execution_time_seconds'] = (data['end_time'] - data['start_time']).total_seconds()
                          else:
-                            data['execution_time_seconds'] = 0.0 # または適切なデフォルト値
+                            data['execution_time_seconds'] = 0.0  # Or another sensible default
 
                      cache[exp_id] = ExperimentResult(**data)
                  except Exception as e:
@@ -43,8 +43,8 @@ class ResultAggregatorDatabase(BaseComponent):
         return cache
 
     def _save_manifest(self):
-        """現在の結果キャッシュをマニフェストファイルに保存"""
-        # ExperimentResultオブジェクトをJSONシリアライズ可能な辞書に変換（簡易版）
+        """Persist the current results cache to the manifest file."""
+        # Convert ExperimentResult objects into JSON-serializable dicts (simple approach)
         serializable_data = {}
         for exp_id, result in self.results_cache.items():
             data = result.__dict__.copy()
@@ -55,7 +55,7 @@ class ResultAggregatorDatabase(BaseComponent):
         write_json(serializable_data, self.manifest_file)
 
     def collect_result(self, exp_id: str, worktree_path: str) -> Optional[ExperimentResult]:
-        """指定されたWorktreeから実験結果を収集し、DB（ファイル）に保存"""
+        """Collect results from a worktree and save them to the manifest."""
         method_name = "collect_result"
         self._log_start(method_name, exp_id=exp_id, worktree_path=worktree_path)
 
@@ -65,8 +65,8 @@ class ResultAggregatorDatabase(BaseComponent):
 
         done_file_path = os.path.join(worktree_path, f"DONE_{exp_id}")
         result_json_path = os.path.join(worktree_path, f"result_{exp_id}.json")
-        wca_log_path = os.path.join(worktree_path, f"wca_{exp_id}.log")
-        error_log_path = os.path.join(worktree_path, f"ERROR_{exp_id}.log") # WCAが異常終了した場合
+        waa_log_path = os.path.join(worktree_path, f"waa_{exp_id}.log")
+        error_log_path = os.path.join(worktree_path, f"ERROR_{exp_id}.log")  # In case the WAA exits abnormally
 
         status = "UNKNOWN"
         if os.path.exists(done_file_path):
@@ -82,32 +82,32 @@ class ResultAggregatorDatabase(BaseComponent):
         error_message = None
         if status != "SUCCESS":
              if os.path.exists(error_log_path):
-                  error_message = read_markdown(error_log_path) # エラーログの内容を読む
+                  error_message = read_markdown(error_log_path)  # Read error log content
              elif status == "UNEXPECTED_FAILURE":
-                  error_message = "WCA process terminated unexpectedly."
+                  error_message = "WAA process terminated unexpectedly."
              elif status == "FAILURE_NO_DONE_FILE":
                   error_message = "DONE file was not created."
-             else: # status == "FAILURE" from DONE file
-                  # WCAログからエラーを探すことも可能（今回は省略）
-                  error_message = "Simulated WCA failure or error during execution."
+             else:  # status == "FAILURE" from DONE file
+                  # Could inspect WAA logs for details (omitted)
+                  error_message = "Simulated WAA failure or error during execution."
 
 
-        # 結果ファイルのリストアップとコピー
-        collected_files_relative = [] # results_dir基準の相対パス
+        # Copy result files and build list
+        collected_files_relative = []  # Paths relative to results dir
         exp_result_dir = os.path.join(self.results_base_dir, exp_id)
         ensure_dir(exp_result_dir)
 
-        # WCAログは必ずコピー
-        collected_log_path_relative = os.path.join(exp_id, os.path.basename(wca_log_path))
+        # Always copy the WAA log
+        collected_log_path_relative = os.path.join(exp_id, os.path.basename(waa_log_path))
         collected_log_path_absolute = os.path.join(self.results_base_dir, collected_log_path_relative)
-        if os.path.exists(wca_log_path):
-            copy_file(wca_log_path, collected_log_path_absolute)
+        if os.path.exists(waa_log_path):
+            copy_file(waa_log_path, collected_log_path_absolute)
         else:
-             self.logger.warning(f"WCA log file not found: {wca_log_path}")
-             collected_log_path_relative = None # ログが見つからない場合
+             self.logger.warning(f"WAA log file not found: {waa_log_path}")
+             collected_log_path_relative = None  # If log missing
 
-        # その他の生成された可能性のあるファイル (submission, modelなど)
-        potential_files = [f"submission_{exp_id}.csv", f"model_{exp_id}.pkl"] # 他にもあれば追加
+        # Other potential outputs (submission, model, etc.)
+        potential_files = [f"submission_{exp_id}.csv", f"model_{exp_id}.pkl"]  # Add more if needed
         for fname in potential_files:
             src_path = os.path.join(worktree_path, fname)
             if os.path.exists(src_path):
@@ -116,22 +116,21 @@ class ResultAggregatorDatabase(BaseComponent):
                 copy_file(src_path, dst_absolute)
                 collected_files_relative.append(dst_relative)
 
-        # ExperimentResultオブジェクト作成 (開始/終了時間は仮)
-        # TODO: KSEから仮説情報を取得してiteration, strategy_name, parametersを埋める必要あり
-        #       現状ではこれらの情報はWorktree内にはないので、MCDUから渡すか、
-        #       exp_idから復元する仕組みが必要。ここではダミー値を入れる。
+        # Build ExperimentResult (start/end times are placeholder values)
+        # TODO: Pull hypothesis info to populate iteration, strategy_name, parameters.
+        #       That data is not stored in the worktree; pass from MCDU or recover from exp_id.
         dummy_start = datetime.datetime.now() - datetime.timedelta(minutes=1)
         dummy_end = datetime.datetime.now()
         dummy_duration = (dummy_end-dummy_start).total_seconds()
 
         result = ExperimentResult(
             experiment_id=exp_id,
-            iteration=-1, # 要取得
-            strategy_name="Unknown", # 要取得
-            parameters={}, # 要取得
-            start_time=dummy_start, # WCAシミュレータ内で記録・保存すべき
-            end_time=dummy_end,     # WCAシミュレータ内で記録・保存すべき
-            execution_time_seconds=dummy_duration, # WCAシミュレータ内で計算・保存すべき
+            iteration=-1,  # To be populated
+            strategy_name="Unknown",  # To be populated
+            parameters={},  # To be populated
+            start_time=dummy_start,  # Should be recorded/saved by WAA simulator
+            end_time=dummy_end,     # Should be recorded/saved by WAA simulator
+            execution_time_seconds=dummy_duration,  # Should be calculated/saved by WAA simulator
             score=score,
             result_files=collected_files_relative,
             log_path=collected_log_path_relative if collected_log_path_relative else "log_not_found",
@@ -140,33 +139,33 @@ class ResultAggregatorDatabase(BaseComponent):
         )
 
         self.results_cache[exp_id] = result
-        self._save_manifest() # 結果をファイルに永続化
+        self._save_manifest()  # Persist results to disk
 
         self.logger.info(f"Collected result for {exp_id}. Status: {status}, Score: {score}")
         self._log_end(method_name, result=result)
         return result
 
     def get_result(self, exp_id: str) -> Optional[ExperimentResult]:
-        """指定された実験IDの結果を取得"""
+        """Fetch a single experiment result by ID."""
         return self.results_cache.get(exp_id)
 
     def get_all_results(self) -> List[ExperimentResult]:
-        """すべての実験結果を取得"""
+        """Return all experiment results."""
         return list(self.results_cache.values())
 
     def get_results_by_iteration(self, iteration: int) -> List[ExperimentResult]:
-        """指定されたイテレーションの実験結果を取得"""
+        """Return results for a given iteration."""
         return [res for res in self.results_cache.values() if res.iteration == iteration]
 
     def update_result_metadata(self, exp_id: str, hypothesis: ExperimentHypothesis):
-        """収集後、仮説情報を使って結果のメタデータを更新する"""
+        """Update result metadata using hypothesis details after collection."""
         if exp_id in self.results_cache:
             result = self.results_cache[exp_id]
             result.iteration = hypothesis.iteration
             result.strategy_name = hypothesis.strategy_name
             result.parameters = hypothesis.parameters
-            # TODO: WCAが開始/終了時間/実行時間を記録・保存するように変更した場合、
-            #       ここでその情報をresult_{exp_id}.jsonから読み込んで設定する
+            # TODO: If WAA records start/end/duration in result_{exp_id}.json,
+            #       read and set those fields here.
             self._save_manifest()
             self.logger.info(f"Updated metadata for result {exp_id}")
         else:

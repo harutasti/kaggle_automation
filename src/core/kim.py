@@ -9,9 +9,8 @@ from typing import Optional, List, Dict, Any
 
 from .base_component import BaseComponent
 from ..data_models import CompetitionInfo
-from ..utils.file_utils import ensure_dir, write_json, read_json
+from ..utils.file_utils import ensure_dir
 from ..utils.crawler_parser import parse_competition_info
-from ..utils.claude_code_wrapper import ClaudeCodeWrapper
 
 class KaggleInterfaceManager(BaseComponent):
     def __init__(self, config: dict):
@@ -26,7 +25,7 @@ class KaggleInterfaceManager(BaseComponent):
         self.max_discussions = config.get("max_discussions", 20)
 
     def _authenticate_kaggle(self):
-        """Kaggle APIの認証を行う"""
+        """Authenticate with the Kaggle API."""
         try:
             # Import here to avoid authentication at module import time
             from kaggle.api.kaggle_api_extended import KaggleApi
@@ -69,101 +68,8 @@ class KaggleInterfaceManager(BaseComponent):
             self.logger.error(f"Error running crawler: {e}")
             return False
 
-    def _run_claude_analysis(self, competition_path: str) -> Optional[Dict[str, Any]]:
-        """Run Claude Code to analyze competition data"""
-        try:
-            # Check if Claude Code is enabled
-            claude_config = self.config.get("claude_code", {})
-            if not claude_config.get("enabled", False):
-                self.logger.info("Claude Code is not enabled, skipping analysis")
-                return None
-            
-            # Initialize Claude Code wrapper
-            wrapper = ClaudeCodeWrapper(self.config)
-            
-            # Create a focused prompt that avoids hanging
-            simple_prompt = f"""Analyze the Kaggle competition data in this directory and create a JSON analysis file.
-
-Competition: {self.competition_name}
-Working directory: {competition_path}
-
-Tasks:
-1. Check if ./data/train.csv and ./data/test.csv exist
-2. If they exist, read first 5 rows to understand data structure
-3. Look for evaluation metric in ./pages/overview.html
-4. Create a competition_analysis.json file with your findings
-
-Required output format (save as competition_analysis.json):
-{{
-  "competition_type": "regression or classification",
-  "metric_analysis": {{
-    "metric_name": "RMSE or AUC or other"
-  }},
-  "data_overview": {{
-    "train_shape": [rows, columns],
-    "test_shape": [rows, columns],
-    "target_column": "name of target column if found"
-  }},
-  "initial_strategy": {{
-    "feature_engineering": [
-      {{"type": "numerical", "description": "suggestion", "priority": "high/medium/low"}}
-    ]
-  }}
-}}
-
-IMPORTANT: Create the file even with partial information if some data is missing."""
-            
-            # Use the wrapper to run Claude Code
-            result = wrapper.execute_task(
-                prompt=simple_prompt,
-                working_directory=competition_path,
-                allowed_tools=["Read", "Write", "LS", "Grep", "Glob"],
-                timeout=60  # Shorter timeout to prevent hanging
-            )
-            
-            if result.success:
-                # Check if the analysis file was created
-                analysis_path = os.path.join(competition_path, "competition_analysis.json")
-                if os.path.exists(analysis_path):
-                    self.logger.info("Successfully created competition_analysis.json")
-                    return read_json(analysis_path)
-                else:
-                    self.logger.warning("Claude Code did not create competition_analysis.json")
-                    return None
-            else:
-                self.logger.error(f"Claude Code analysis failed: {result.error}")
-                return None
-                
-        except Exception as e:
-            self.logger.error(f"Error running Claude analysis: {e}")
-            return None
-
-    def _enhance_competition_info(self, info: CompetitionInfo, claude_analysis: Dict[str, Any]) -> None:
-        """Enhance competition info with Claude analysis results"""
-        try:
-            # Update evaluation metric if Claude found it
-            if claude_analysis.get("metric_analysis", {}).get("metric_name"):
-                info.evaluation_metric = claude_analysis["metric_analysis"]["metric_name"]
-                self.logger.info(f"Updated evaluation metric from Claude analysis: {info.evaluation_metric}")
-            
-            # Update competition type
-            if claude_analysis.get("competition_type"):
-                info.competition_type = claude_analysis["competition_type"]
-                info.competition_subtype = claude_analysis.get("competition_subtype", "")
-            
-            # Add initial insights
-            if claude_analysis.get("initial_strategy", {}).get("feature_engineering"):
-                info.initial_insights = claude_analysis["initial_strategy"]["feature_engineering"]
-            
-            # Add data quality warnings
-            if claude_analysis.get("data_quality", {}).get("warnings"):
-                info.data_warnings = claude_analysis["data_quality"]["warnings"]
-                
-        except Exception as e:
-            self.logger.warning(f"Error enhancing competition info with Claude analysis: {e}")
-
     def get_competition_info(self) -> Optional[CompetitionInfo]:
-        """コンペティション情報を取得する"""
+        """Retrieve competition information."""
         method_name = "get_competition_info"
         self._log_start(method_name)
         try:
@@ -174,36 +80,16 @@ IMPORTANT: Create the file even with partial information if some data is missing
                 if not os.path.exists(competition_path):
                     self.logger.info("Crawler data not found, running crawler...")
                     if self._run_crawler():
-                        # Run Claude analysis on the crawled data
-                        claude_analysis = self._run_claude_analysis(competition_path)
-                        
                         # Try to parse after crawling
                         info = parse_competition_info(self.competition_name, self.crawler_output_dir)
                         if info:
-                            # Enhance with Claude analysis if available
-                            if claude_analysis:
-                                self._enhance_competition_info(info, claude_analysis)
-                            
                             self.logger.info(f"Successfully parsed competition info from crawler data: {info.name}")
                             self._log_end(method_name, info)
                             return info
                 else:
-                    # Check if we already have Claude analysis
-                    analysis_path = os.path.join(competition_path, "competition_analysis.json")
-                    claude_analysis = None
-                    if not os.path.exists(analysis_path):
-                        # Run Claude analysis if not done before
-                        claude_analysis = self._run_claude_analysis(competition_path)
-                    else:
-                        claude_analysis = read_json(analysis_path)
-                    
                     # Parse existing crawler data
                     info = parse_competition_info(self.competition_name, self.crawler_output_dir)
                     if info:
-                        # Enhance with Claude analysis if available
-                        if claude_analysis:
-                            self._enhance_competition_info(info, claude_analysis)
-                            
                         self.logger.info(f"Successfully parsed competition info from existing crawler data: {info.name}")
                         self._log_end(method_name, info)
                         return info
@@ -212,7 +98,7 @@ IMPORTANT: Create the file even with partial information if some data is missing
             
             # Fall back to API or simulation
             if self.simulation_mode or not self.api:
-                # シミュレーション用のダミーデータ
+                # Dummy data for simulation mode
                 dummy_deadline = datetime.datetime.now() + datetime.timedelta(days=30)
                 info = CompetitionInfo(
                     name=self.competition_name,
@@ -223,10 +109,10 @@ IMPORTANT: Create the file even with partial information if some data is missing
                 )
                 self.logger.info(f"Generated dummy competition info for: {self.competition_name}")
             else:
-                # 実際のKaggle APIから情報を取得
+                # Fetch info from real Kaggle API
                 comp = self.api.competition_view(self.competition_name)
                 
-                # 日付フォーマットは変わる可能性があるので例外処理
+                # Parse deadline with flexible formats
                 deadline = None
                 if hasattr(comp, 'deadline'):
                     try:
@@ -237,7 +123,7 @@ IMPORTANT: Create the file even with partial information if some data is missing
                         except ValueError:
                             self.logger.warning(f"Could not parse deadline: {comp.deadline}")
                 
-                # 利用可能なファイル一覧を取得
+                # Get available file list
                 try:
                     files = self.api.competition_list_files(self.competition_name)
                     data_files = [f.name for f in files]
@@ -261,7 +147,7 @@ IMPORTANT: Create the file even with partial information if some data is missing
             return None
 
     def download_data_files(self, competition_info: CompetitionInfo) -> bool:
-        """データファイルをダウンロードする"""
+        """Download competition data files."""
         method_name = "download_data_files"
         self._log_start(method_name, competition_name=competition_info.name)
         try:
@@ -289,7 +175,7 @@ IMPORTANT: Create the file even with partial information if some data is missing
             
             # Fall back to API or simulation
             if self.simulation_mode or not self.api:
-                # シミュレーション用のダミーファイル作成
+                # Create dummy files for simulation mode
                 for filename in competition_info.data_files:
                     dummy_file_path = os.path.join(self.download_dir, filename)
                     if not os.path.exists(dummy_file_path):
@@ -297,30 +183,30 @@ IMPORTANT: Create the file even with partial information if some data is missing
                             f.write("dummy data for " + filename)
                         self.logger.info(f"Created dummy data file: {dummy_file_path}")
             else:
-                # 実際のKaggle APIからファイルをダウンロード
+                # Download files from Kaggle API
                 self.logger.info(f"Downloading competition files for {self.competition_name} to {self.download_dir}")
                 
-                # ZIPファイルのダウンロード先パス
+                # Destination for ZIP download
                 zip_path = os.path.join(self.download_dir, f"{self.competition_name}.zip")
                 
-                # ファイルのダウンロード
+                # Download the file
                 self.api.competition_download_files(self.competition_name, path=self.download_dir, quiet=False)
                 
-                # ZIPファイルの解凍処理
+                # Extract the ZIP file
                 if os.path.exists(zip_path):
                     self.logger.info(f"Extracting downloaded ZIP file: {zip_path}")
                     with zipfile.ZipFile(zip_path, 'r') as zip_ref:
                         zip_ref.extractall(self.download_dir)
                     
-                    # ZIP解凍後はファイルを削除してもよい
+                    # Optionally remove the ZIP after extraction
                     os.remove(zip_path)
                     self.logger.info("ZIP file extracted and removed")
                 
-                # 実際にダウンロードされたファイルの確認
+                # Inspect downloaded files
                 downloaded_files = os.listdir(self.download_dir)
                 self.logger.info(f"Downloaded files: {downloaded_files}")
                 
-                # データファイル一覧を更新
+                # Update data file list
                 competition_info.data_files = [f for f in downloaded_files if os.path.isfile(os.path.join(self.download_dir, f))]
             
             self._log_end(method_name, result=True)
@@ -330,7 +216,7 @@ IMPORTANT: Create the file even with partial information if some data is missing
             return False
 
     def submit_predictions(self, file_path: str, message: str) -> bool:
-        """予測結果を提出する"""
+        """Submit predictions to Kaggle."""
         method_name = "submit_predictions"
         self._log_start(method_name, file_path=file_path, message=message)
         
@@ -340,17 +226,17 @@ IMPORTANT: Create the file even with partial information if some data is missing
             return True
         
         try:
-            # ファイルの存在確認
+            # Confirm file exists
             if not os.path.exists(file_path):
                 self.logger.error(f"Submission file does not exist: {file_path}")
                 self._log_end(method_name, result=False)
                 return False
                 
-            # Kaggle APIを使用して提出
+            # Submit via Kaggle API
             self.logger.info(f"Submitting {file_path} to competition {self.competition_name} with message: {message}")
             result = self.api.competition_submit(file_path, message, self.competition_name)
             
-            # 提出結果の確認
+            # Check submission result
             if hasattr(result, 'error'):
                 self.logger.error(f"Submission failed: {result.error}")
                 self._log_end(method_name, result=False)
