@@ -5,6 +5,7 @@ import subprocess
 import argparse
 import shutil
 import glob
+import json
 from pathlib import Path
 from tqdm import tqdm
 from crawl4ai import AsyncWebCrawler, BrowserConfig, CrawlerRunConfig, CacheMode
@@ -114,12 +115,15 @@ def clean_markdown(md: str, competition_id: str, page_type: str = "overview"):
 
 def download_kaggle_competition_data(competition_id: str, output_dir: str) -> bool:
     """
-    Use the Kaggle CLI to download, unzip competition data, and remove zip files.
+    Use the Kaggle Python API to download and unzip competition data.
 
     Requires a `kaggle.json` credentials file next to this script or in ~/.kaggle.
     """
     current_dir = Path(__file__).resolve().parent
-    kaggle_json_src = current_dir / "kaggle.json"
+    # Prefer a kaggle.json in the current working directory, fall back to alongside this script.
+    kaggle_json_src = Path.cwd() / "kaggle.json"
+    if not kaggle_json_src.exists():
+        kaggle_json_src = current_dir / "kaggle.json"
     kaggle_dir_dest = Path.home() / ".kaggle"
     kaggle_json_dest = kaggle_dir_dest / "kaggle.json"
 
@@ -140,13 +144,42 @@ def download_kaggle_competition_data(competition_id: str, output_dir: str) -> bo
             shutil.copy2(kaggle_json_src, kaggle_json_dest)
             kaggle_json_dest.chmod(0o600)
 
-        # Optional: show which Kaggle account is active
-        subprocess.run("kaggle config view", shell=True, check=True)
+        # Ensure a concrete user agent to avoid NoneType header errors
+        with kaggle_json_dest.open("r", encoding="utf-8") as f:
+            creds = json.load(f)
+        if not creds.get("user_agent"):
+            creds["user_agent"] = "autokaggler/1.0"
+            with kaggle_json_dest.open("w", encoding="utf-8") as f:
+                json.dump(creds, f)
+            kaggle_json_dest.chmod(0o600)
+            print(f"[download] set user_agent to {creds['user_agent']} in {kaggle_json_dest}")
 
-        # Download data
-        cmd = f'kaggle competitions download -c {competition_id} -p "{data_dir}" --force'
-        print(f"[download] {cmd}")
-        subprocess.run(cmd, shell=True, check=True)
+        # Set environment variables to prevent None values in headers
+        os.environ["KAGGLE_USER_AGENT"] = creds.get("user_agent", "autokaggler/1.0")
+        os.environ["KAGGLE_USERNAME"] = creds.get("username", "")
+        os.environ["KAGGLE_KEY"] = creds.get("key", "")
+
+        # Ensure all proxy/path config values are strings, not None
+        if "proxy" not in creds or creds["proxy"] is None:
+            creds.pop("proxy", None)
+        if "path" not in creds or creds["path"] is None:
+            creds.pop("path", None)
+        if "competition" not in creds or creds["competition"] is None:
+            creds.pop("competition", None)
+
+        # Rewrite config without None values
+        with kaggle_json_dest.open("w", encoding="utf-8") as f:
+            json.dump(creds, f)
+        kaggle_json_dest.chmod(0o600)
+
+        # Use Kaggle Python API directly instead of CLI
+        from kaggle.api.kaggle_api_extended import KaggleApi
+
+        api = KaggleApi()
+        api.authenticate()
+
+        print(f"[download] downloading competition files for {competition_id}")
+        api.competition_download_files(competition_id, path=str(data_dir), force=True)
 
         # Unzip all .zip files
         unzip_cmd = (
@@ -164,10 +197,13 @@ def download_kaggle_competition_data(competition_id: str, output_dir: str) -> bo
         return True
 
     except subprocess.CalledProcessError as e:
-        print(f"[download] Kaggle CLI returned {e.returncode}: {e.cmd}")
+        print(f"[download] command returned {e.returncode}: {e.cmd}")
         return False
     except Exception as e:
+        import traceback
         print(f"[download] unexpected error: {e}")
+        print("[download] full traceback:")
+        traceback.print_exc()
         return False
 
 
@@ -467,6 +503,11 @@ async def main():
         action="store_true",
         help="Run the browser *not* in headless mode (useful for debugging)",
     )
+    parser.add_argument(
+        "--data-only",
+        action="store_true",
+        help="Only download competition data and skip crawling pages/discussions",
+    )
     args = parser.parse_args()
 
     competition_id = args.competition_id
@@ -487,6 +528,11 @@ async def main():
 
     # 1. Dataset
     download_kaggle_competition_data(competition_id, base_dir)
+
+    if args.data_only:
+        print("[mode] data-only requested; skipping page/discussion crawling")
+        print(f"[output] files saved under {base_dir.resolve()}")
+        return
 
     # 2. Crawler
     browser_cfg = BrowserConfig(

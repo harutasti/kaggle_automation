@@ -89,7 +89,3 @@ uv run python integrations/kaggle_crawler/crawl_kaggle_competition.py <competiti
 - **EO**: Experiment Orchestrator - Manages parallel experiment execution
 - **RAD**: Result Aggregator Database - Collects and stores results
 - **PA**: Performance Analyzer - Analyzes results and provides insights
-
-## License
-
-[License information here]
