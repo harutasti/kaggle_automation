@@ -15,24 +15,25 @@ logger = logging.getLogger(__name__)
 
 
 class PromptFiller:
-    """Fills KSE prompt templates with actual data."""
+    """Fills KSE and PA prompt templates with actual data."""
 
-    def __init__(self, prompts_dir: str = "prompts/KSE"):
+    def __init__(self, config: Dict[str, Any] = None):
         """
         Initialize the prompt filler.
 
         Args:
-            prompts_dir: Directory containing prompt templates
+            config: Configuration dictionary (for compatibility)
         """
-        self.prompts_dir = Path(prompts_dir)
-        self.initial_prompt_path = self.prompts_dir / "kse_prompt_initial_iteration.md"
-        self.subsequent_prompt_path = self.prompts_dir / "kse_prompt_subsequent_iterations.md"
+        # Support both KSE and PA prompts
+        self.kse_prompts_dir = Path("prompts/KSE")
+        self.pa_prompts_dir = Path("prompts/PA")
 
-        # Validate prompt files exist
-        if not self.initial_prompt_path.exists():
-            raise FileNotFoundError(f"Initial iteration prompt not found at {self.initial_prompt_path}")
-        if not self.subsequent_prompt_path.exists():
-            raise FileNotFoundError(f"Subsequent iterations prompt not found at {self.subsequent_prompt_path}")
+        self.initial_prompt_path = self.kse_prompts_dir / "kse_prompt_initial_iteration.md"
+        self.subsequent_prompt_path = self.kse_prompts_dir / "kse_prompt_subsequent_iterations.md"
+        self.pa_prompt_path = self.pa_prompts_dir / "pa_analysis_prompt.md"
+
+        # Don't validate KSE prompt files if they don't exist (PA-only usage)
+        self.config = config or {}
 
     def fill_initial_prompt(
         self,
@@ -56,6 +57,10 @@ class PromptFiller:
             Filled prompt string
         """
         logger.info("Filling initial iteration prompt template")
+
+        # Validate prompt file exists when needed
+        if not self.initial_prompt_path.exists():
+            raise FileNotFoundError(f"Initial iteration prompt not found at {self.initial_prompt_path}")
 
         # Load template
         with open(self.initial_prompt_path, "r") as f:
@@ -102,6 +107,10 @@ class PromptFiller:
             Filled prompt string
         """
         logger.info(f"Filling subsequent iteration prompt template for iteration {iteration_number}")
+
+        # Validate prompt file exists when needed
+        if not self.subsequent_prompt_path.exists():
+            raise FileNotFoundError(f"Subsequent iterations prompt not found at {self.subsequent_prompt_path}")
 
         # Load template
         with open(self.subsequent_prompt_path, "r") as f:

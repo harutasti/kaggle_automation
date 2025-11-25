@@ -51,6 +51,7 @@ def execute_codex_experiment(
     worktree_path: str | Path,
     experiment_id: str,
     timeout: int = 3600,
+    dry_run: bool = False,
     logger: Optional[logging.Logger] = None
 ) -> CodexResult:
     """
@@ -80,6 +81,18 @@ def execute_codex_experiment(
 
     if logger is None:
         logger = logging.getLogger("AutoKaggle.CodexExecutor")
+
+    # If dry-run, return dummy success without checking files
+    if dry_run:
+        logger.info(f"DRY-RUN: Would execute experiment {experiment_id}")
+        return CodexResult(
+            success=True,
+            mode=CodexMode.WAA,
+            experiment_id=experiment_id,
+            execution_time=0.0,
+            result_data={},
+            output_file=str(output_file)
+        )
 
     # Validate inputs
     if not task_markdown_path.exists():
@@ -387,6 +400,7 @@ def execute_kse_hypothesis_generation(
     iteration: int,
     num_hypotheses: int = 3,
     timeout: int = 600,
+    dry_run: bool = False,
     logger: Optional[logging.Logger] = None
 ) -> CodexResult:
     """
@@ -411,6 +425,17 @@ def execute_kse_hypothesis_generation(
 
     # Ensure output directory exists
     output_dir.mkdir(parents=True, exist_ok=True)
+
+    # If dry-run, return dummy success
+    if dry_run:
+        logger.info(f"DRY-RUN: Would generate {num_hypotheses} KSE hypotheses for iteration {iteration}")
+        return CodexResult(
+            success=True,
+            mode=CodexMode.KSE,
+            execution_time=0.0,
+            hypotheses=[],  # Empty in dry-run
+            output_file=str(output_file)
+        )
 
     # Prepare instruction for Codex
     stdin_input = f"""You are the Knowledge Strategy Engine (KSE) for AutoKaggle.
@@ -533,10 +558,11 @@ After creating all files, create a summary file named 'kse_summary_iter{iteratio
 
 
 def execute_pa_analysis(
-    results_data: List[Dict[str, Any]],
+    results_data: List[Dict[str, Any]] | str,
     iteration: int,
     output_dir: str | Path,
     timeout: int = 300,
+    dry_run: bool = False,
     logger: Optional[logging.Logger] = None
 ) -> CodexResult:
     """
@@ -561,8 +587,19 @@ def execute_pa_analysis(
     # Ensure output directory exists
     output_dir.mkdir(parents=True, exist_ok=True)
 
+    # If dry-run, return dummy success
+    if dry_run:
+        logger.info(f"DRY-RUN: Would analyze {len(results_data) if isinstance(results_data, list) else 0} results for iteration {iteration}")
+        return CodexResult(
+            success=True,
+            mode=CodexMode.PA,
+            execution_time=0.0,
+            analysis={},  # Empty in dry-run
+            output_file=str(output_file)
+        )
+
     # Prepare results summary for analysis
-    results_summary = json.dumps(results_data, indent=2)
+    results_summary = results_data if isinstance(results_data, str) else json.dumps(results_data, indent=2)
 
     # Prepare instruction for Codex
     stdin_input = f"""You are the Performance Analyzer (PA) for AutoKaggle.

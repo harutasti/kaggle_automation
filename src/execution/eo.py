@@ -252,10 +252,10 @@ Please execute the experiment exactly as described above. Ensure you:
             self._log_error(method_name, e)
 
     def get_worktree_path(self, exp_id: str) -> Optional[str]:
-         """Return the worktree path for a given experiment ID."""
+        """Return the worktree path for a given experiment ID."""
         if exp_id in self.active_processes:
             return self.active_processes[exp_id][1]
-         # Completed experiments drop from active_processes; reconstruct path
-         path = os.path.join(self.worktree_base_dir, exp_id)
-         # Caller can check existence as needed
-         return path
+        # Completed experiments drop from active_processes; reconstruct path
+        path = os.path.join(self.worktree_base_dir, exp_id)
+        # Caller can check existence as needed
+        return path

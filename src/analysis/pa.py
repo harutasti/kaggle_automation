@@ -1,10 +1,14 @@
 import os
-from typing import List, Optional
+from typing import List, Optional, Dict, Any
 import datetime
+import json
 
 from ..core.base_component import BaseComponent
 from ..data_models import ExperimentResult, AnalysisResult
 from ..utils.file_utils import write_markdown, ensure_dir
+from ..utils.codex_executor import CodexMode, execute_codex
+from ..utils.pa_parser import parse_pa_codex_output, extract_best_score_info, extract_improvement_trend
+from ..utils.prompt_filler import PromptFiller
 
 class PerformanceAnalyzer(BaseComponent):
     def __init__(self, config: dict):
@@ -16,6 +20,14 @@ class PerformanceAnalyzer(BaseComponent):
         # Only ensure directory if not in dry-run mode
         if not config.get("dry_run", False):
             ensure_dir(self.analysis_dir)
+
+        # Codex configuration
+        self.use_codex = config.get("pa_codex_enabled", False)
+        self.dry_run = config.get("dry_run", False)
+        self.max_iterations = config.get("max_iterations", 3)
+        self.prompt_filler = PromptFiller(config)
+        self.competition_name = config.get("kaggle_competition_name", "unknown")
+        self.evaluation_metric = config.get("evaluation_metric", "unknown")
 
     def analyze_results(self, iteration: int, results: List[ExperimentResult]) -> AnalysisResult:
         """Analyze the current iteration's results (and optionally prior ones)."""
@@ -108,5 +120,198 @@ class PerformanceAnalyzer(BaseComponent):
             recommended_strategies=recommended_strategies
         )
 
+        # If Codex is enabled, perform deep analysis
+        if self.use_codex and not self.dry_run:
+            try:
+                self.logger.info("Performing deep analysis with Codex...")
+                codex_insights = self._analyze_with_codex(iteration, results, analysis)
+
+                # Update analysis with Codex insights
+                if codex_insights:
+                    analysis.success_patterns = codex_insights.get("success_patterns", [])
+                    analysis.failure_patterns = codex_insights.get("failure_patterns", [])
+                    analysis.feature_importance = codex_insights.get("feature_importance", [])
+                    analysis.hyperparameter_insights = codex_insights.get("hyperparameter_insights", [])
+                    analysis.high_priority_recommendations = codex_insights.get("high_priority_recommendations", [])
+                    analysis.medium_priority_recommendations = codex_insights.get("medium_priority_recommendations", [])
+                    analysis.experimental_recommendations = codex_insights.get("experimental_recommendations", [])
+                    analysis.avoid_recommendations = codex_insights.get("avoid_recommendations", [])
+                    analysis.unresolved_questions = codex_insights.get("unresolved_questions", [])
+                    analysis.overfitting_analysis = codex_insights.get("overfitting_analysis")
+                    analysis.convergence_status = codex_insights.get("convergence_status", improvement_trend)
+                    analysis.improvement_rate = codex_insights.get("improvement_rate")
+                    analysis.computational_efficiency = codex_insights.get("computational_efficiency", [])
+                    analysis.top_discoveries = codex_insights.get("top_discoveries", [])
+                    analysis.critical_decisions = codex_insights.get("critical_decisions", [])
+
+                    # Update summary with deeper insights
+                    if codex_insights.get("summary"):
+                        analysis.summary_markdown += f"\n\n## Deep Analysis Summary\n\n{codex_insights['summary']}"
+
+                    # Save updated analysis
+                    write_markdown(analysis.summary_markdown, analysis_file_path)
+                    self.logger.info("Deep analysis with Codex completed successfully")
+
+            except Exception as e:
+                self.logger.error(f"Error performing Codex analysis: {e}")
+                # Continue with basic analysis if Codex fails
+
         self._log_end(method_name, analysis)
         return analysis
+
+    def _analyze_with_codex(self, iteration: int, results: List[ExperimentResult],
+                          basic_analysis: AnalysisResult) -> Optional[Dict[str, Any]]:
+        """
+        Use Codex to perform deep analysis of experiment results.
+
+        Args:
+            iteration: Current iteration number
+            results: List of experiment results
+            basic_analysis: Basic analysis already performed
+
+        Returns:
+            Dictionary with structured insights from Codex
+        """
+        try:
+            # Prepare the prompt
+            prompt = self._prepare_pa_prompt(iteration, results, basic_analysis)
+
+            if not prompt:
+                self.logger.warning("Could not prepare PA prompt")
+                return None
+
+            # Execute Codex
+            self.logger.info(f"Calling Codex for PA analysis (iteration {iteration})")
+            codex_result = execute_codex(
+                mode=CodexMode.PA,
+                results_data=prompt,  # PA expects results_data, not prompt
+                output_dir=self.analysis_dir,
+                iteration=iteration,
+                dry_run=self.dry_run,
+                timeout=self.config.get("pa_codex_timeout", 180)
+            )
+
+            if not codex_result.success:
+                self.logger.error(f"Codex PA execution failed: {codex_result.error}")
+                return None
+
+            # Parse Codex output
+            if codex_result.analysis:
+                # If already parsed by executor
+                return codex_result.analysis
+
+            # Otherwise parse the raw output
+            if codex_result.output_file:
+                output_path = os.path.join(self.analysis_dir, codex_result.output_file)
+                if os.path.exists(output_path):
+                    with open(output_path, 'r') as f:
+                        codex_output = f.read()
+                    return parse_pa_codex_output(codex_output)
+
+            return None
+
+        except Exception as e:
+            self.logger.error(f"Error in _analyze_with_codex: {e}")
+            return None
+
+    def _prepare_pa_prompt(self, iteration: int, results: List[ExperimentResult],
+                          basic_analysis: AnalysisResult) -> Optional[str]:
+        """
+        Prepare the PA prompt for Codex analysis.
+
+        Args:
+            iteration: Current iteration number
+            results: List of experiment results
+            basic_analysis: Basic analysis already performed
+
+        Returns:
+            Filled prompt string or None if preparation fails
+        """
+        try:
+            # Load PA prompt template
+            prompt_path = os.path.join("prompts", "PA", "pa_analysis_prompt.md")
+            if not os.path.exists(prompt_path):
+                self.logger.error(f"PA prompt template not found: {prompt_path}")
+                return None
+
+            with open(prompt_path, 'r') as f:
+                prompt_template = f.read()
+
+            # Prepare experiment results table
+            table_rows = []
+            for r in results:
+                key_params = json.dumps(r.parameters) if r.parameters else "{}"
+                # Truncate long parameter strings
+                if len(key_params) > 100:
+                    key_params = key_params[:97] + "..."
+
+                row = f"| {r.experiment_id} | {r.strategy_name} | "
+                row += f"{r.score:.4f}" if r.score else "N/A"
+                row += f" | {r.status} | {r.execution_time_seconds:.1f} | "
+                row += "N/A | "  # Memory placeholder
+                row += f"{key_params} |"
+                table_rows.append(row)
+
+            experiment_results_table = "\n".join(table_rows)
+
+            # Calculate statistics
+            successful_results = [r for r in results if r.status == "SUCCESS" and r.score is not None]
+            failed_results = [r for r in results if r.status != "SUCCESS"]
+            scores = [r.score for r in successful_results] if successful_results else []
+
+            # Prepare detailed logs (simplified for now)
+            detailed_logs = []
+            for r in results[:5]:  # Show first 5 experiments in detail
+                log_entry = f"### Experiment: {r.experiment_id}\n"
+                log_entry += f"- Strategy: {r.strategy_name}\n"
+                log_entry += f"- Score: {r.score:.4f}\n" if r.score else "- Score: N/A\n"
+                log_entry += f"- Status: {r.status}\n"
+                log_entry += f"- Runtime: {r.execution_time_seconds:.1f}s\n"
+                if r.error_message:
+                    log_entry += f"- Error: {r.error_message}\n"
+                detailed_logs.append(log_entry)
+
+            # Calculate time remaining (placeholder)
+            time_remaining = "Unknown"  # Would need competition deadline
+
+            # Fill the prompt template
+            replacements = {
+                "{num_experiments}": str(len(results)),
+                "{iteration_number}": str(iteration),
+                "{competition_name}": self.competition_name,
+                "{evaluation_metric}": self.evaluation_metric,
+                "{best_score}": f"{basic_analysis.best_score:.4f}" if basic_analysis.best_score else "N/A",
+                "{max_iterations}": str(self.max_iterations),
+                "{time_remaining}": time_remaining,
+                "{experiment_results_table}": experiment_results_table,
+                "{best_experiment_id}": basic_analysis.best_experiment_id or "N/A",
+                "{avg_score}": f"{sum(scores)/len(scores):.4f}" if scores else "N/A",
+                "{worst_score}": f"{min(scores):.4f}" if scores else "N/A",
+                "{score_std}": f"{self._calculate_std(scores):.4f}" if scores else "N/A",
+                "{success_rate}": f"{len(successful_results)/len(results)*100:.1f}" if results else "0",
+                "{num_successful}": str(len(successful_results)),
+                "{num_total}": str(len(results)),
+                "{total_runtime}": f"{sum(r.execution_time_seconds for r in results)/60:.1f}",
+                "{avg_runtime}": f"{sum(r.execution_time_seconds for r in results)/len(results)/60:.1f}" if results else "0",
+                "{failed_experiments_list}": ", ".join([r.experiment_id for r in failed_results]) or "None",
+                "{detailed_experiment_logs}": "\n\n".join(detailed_logs)
+            }
+
+            # Replace all placeholders
+            filled_prompt = prompt_template
+            for key, value in replacements.items():
+                filled_prompt = filled_prompt.replace(key, str(value))
+
+            return filled_prompt
+
+        except Exception as e:
+            self.logger.error(f"Error preparing PA prompt: {e}")
+            return None
+
+    def _calculate_std(self, values: List[float]) -> float:
+        """Calculate standard deviation."""
+        if not values:
+            return 0.0
+        mean = sum(values) / len(values)
+        variance = sum((x - mean) ** 2 for x in values) / len(values)
+        return variance ** 0.5

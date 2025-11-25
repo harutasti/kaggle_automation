@@ -11,6 +11,7 @@ from ..utils.crawler_parser import parse_discussion_strategies
 from ..utils.dataset_analyzer import DatasetAnalyzer
 from ..utils.system_specs import SystemSpecsDetector
 from ..utils.prompt_filler import PromptFiller
+from ..utils.codex_executor import CodexMode, execute_codex
 
 class KnowledgeStrategyEngine(BaseComponent):
     def __init__(self, config: dict):
@@ -31,7 +32,7 @@ class KnowledgeStrategyEngine(BaseComponent):
         # Initialize new components
         self.system_specs_detector = SystemSpecsDetector()
         self.system_specs = None  # Will be populated on first use
-        self.prompt_filler = PromptFiller(prompts_dir=config.get("prompts_dir", "prompts/KSE"))
+        self.prompt_filler = PromptFiller(config)
         self.dataset_analyzer = None  # Will be initialized when needed
         self.dataset_analysis = None  # Cache for dataset analysis
 
@@ -226,9 +227,54 @@ class KnowledgeStrategyEngine(BaseComponent):
         self.prompt_filler.save_filled_prompt(filled_prompt, prompt_path)
         self.logger.info(f"Saved filled prompt to {prompt_path}")
 
-        # TODO: Execute Codex to generate hypotheses from the filled prompt
-        # For now, return empty list or fallback to programmatic generation
-        self.logger.warning("Codex execution for KSE not yet implemented, falling back to programmatic generation")
+        # Execute Codex to generate hypotheses
+        self.logger.info(f"Calling Codex for KSE hypothesis generation (iteration {iteration})")
+
+        try:
+            codex_result = execute_codex(
+                mode=CodexMode.KSE,
+                prompt_content=filled_prompt,
+                output_dir=self.hypothesis_dir,
+                iteration=iteration,
+                num_hypotheses=num_hypotheses,
+                dry_run=self.config.get("dry_run", False),
+                timeout=self.codex_timeout
+            )
+
+            if codex_result.success and codex_result.hypotheses:
+                # Parse Codex output to create ExperimentHypothesis objects
+                hypotheses = []
+                for hyp_data in codex_result.hypotheses:
+                    exp_id = hyp_data.get("experiment_id", f"iter{iteration}_exp{len(hypotheses)+1}_{uuid.uuid4().hex[:6]}")
+                    strategy = hyp_data.get("strategy", "Unknown")
+                    params = hyp_data.get("parameters", {})
+                    task_md_path = os.path.join(self.hypothesis_dir, f"{exp_id}_task.md")
+
+                    # Generate task markdown from hypothesis
+                    task_markdown = self._generate_task_markdown_from_hypothesis(
+                        exp_id, iteration, strategy, params, competition_info, hyp_data
+                    )
+                    write_markdown(task_markdown, task_md_path)
+
+                    hypothesis = ExperimentHypothesis(
+                        experiment_id=exp_id,
+                        iteration=iteration,
+                        strategy_name=strategy,
+                        parameters=params,
+                        task_markdown_path=task_md_path
+                    )
+                    hypotheses.append(hypothesis)
+
+                self.logger.info(f"Successfully generated {len(hypotheses)} hypotheses from Codex")
+                return hypotheses
+
+            else:
+                self.logger.warning(f"Codex execution failed or returned no hypotheses: {codex_result.error}")
+                self.logger.warning("Falling back to programmatic generation")
+
+        except Exception as e:
+            self.logger.error(f"Error calling Codex for KSE: {e}")
+            self.logger.warning("Falling back to programmatic generation")
 
         # Fallback to programmatic generation
         hypotheses = []
@@ -258,19 +304,19 @@ class KnowledgeStrategyEngine(BaseComponent):
             return {"experiments": [], "best_experiment": {}, "worst_experiment": {}}
 
         # Find best and worst experiments
-        valid_results = [r for r in previous_results if r.validation_score is not None]
+        valid_results = [r for r in previous_results if r.score is not None]
         if valid_results:
-            best_result = max(valid_results, key=lambda r: r.validation_score)
-            worst_result = min(valid_results, key=lambda r: r.validation_score)
-            scores = [r.validation_score for r in valid_results]
+            best_result = max(valid_results, key=lambda r: r.score)
+            worst_result = min(valid_results, key=lambda r: r.score)
+            scores = [r.score for r in valid_results]
 
             return {
                 "experiments": [
                     {
                         "id": r.experiment_id,
                         "strategy": r.strategy_name,
-                        "validation_score": r.validation_score,
-                        "runtime_minutes": r.runtime_seconds / 60 if r.runtime_seconds else 0,
+                        "validation_score": r.score,
+                        "runtime_minutes": r.execution_time_seconds / 60 if r.execution_time_seconds else 0,
                         "status": r.status,
                         "train_val_gap": 0  # Would need to calculate from logs
                     }
@@ -279,13 +325,13 @@ class KnowledgeStrategyEngine(BaseComponent):
                 "best_experiment": {
                     "id": best_result.experiment_id,
                     "strategy": best_result.strategy_name,
-                    "score": best_result.validation_score,
-                    "runtime_minutes": best_result.runtime_seconds / 60 if best_result.runtime_seconds else 0
+                    "score": best_result.score,
+                    "runtime_minutes": best_result.execution_time_seconds / 60 if best_result.execution_time_seconds else 0
                 },
                 "worst_experiment": {
                     "id": worst_result.experiment_id,
                     "strategy": worst_result.strategy_name,
-                    "score": worst_result.validation_score
+                    "score": worst_result.score
                 },
                 "mean_score": sum(scores) / len(scores),
                 "std_score": 0,  # Would need numpy for std
@@ -321,7 +367,7 @@ class KnowledgeStrategyEngine(BaseComponent):
             "experimental": [],
             "avoid": getattr(analysis_result, 'strategies_to_avoid', []),
             "unresolved_questions": getattr(analysis_result, 'unresolved_questions', []),
-            "summary": analysis_result.summary if analysis_result.summary else "Analysis complete."
+            "summary": analysis_result.summary_markdown if analysis_result.summary_markdown else "Analysis complete."
         }
 
     def generate_next_hypotheses(self,
@@ -407,6 +453,55 @@ class KnowledgeStrategyEngine(BaseComponent):
                     "blend_method": random.choice(["weighted", "stacking", "voting"])}
         else:
             return {"param1": "dummy", "param2": random.randint(1, 10)}
+
+    def _generate_task_markdown_from_hypothesis(self, exp_id: str, iteration: int, strategy: str,
+                                               params: dict, comp_info: CompetitionInfo,
+                                               hypothesis_data: Dict[str, Any]) -> str:
+        """Generate task markdown from Codex-generated hypothesis."""
+        task_md = f"# Experiment Task: {exp_id}\n\n"
+        task_md += f"## Competition: {comp_info.name}\n"
+        task_md += f"## Iteration: {iteration}\n"
+        task_md += f"## Strategy: {strategy}\n\n"
+
+        # Add hypothesis details from Codex
+        if hypothesis_data.get("description"):
+            task_md += f"### Hypothesis\n{hypothesis_data['description']}\n\n"
+
+        if hypothesis_data.get("approach"):
+            task_md += f"### Approach\n{hypothesis_data['approach']}\n\n"
+
+        task_md += f"### Parameters\n```json\n{json.dumps(params, indent=2)}\n```\n\n"
+
+        # Implementation steps
+        task_md += f"### Implementation Steps\n"
+        if hypothesis_data.get("steps"):
+            for i, step in enumerate(hypothesis_data["steps"], 1):
+                task_md += f"{i}. {step}\n"
+        else:
+            # Default steps
+            task_md += f"1. Load data from `{comp_info.data_files}`\n"
+            task_md += f"2. Implement {strategy} with specified parameters\n"
+            task_md += f"3. Train model using cross-validation\n"
+            task_md += f"4. Generate predictions on test set\n"
+            task_md += f"5. Save results to `result_{exp_id}.json`\n"
+
+        task_md += f"\n### Expected Output\n"
+        task_md += f"- Model file: `model_{exp_id}.pkl`\n"
+        task_md += f"- Predictions: `submission_{exp_id}.csv`\n"
+        task_md += f"- Results JSON: `result_{exp_id}.json` containing:\n"
+        task_md += f"  - validation_score\n"
+        task_md += f"  - feature_importance (if applicable)\n"
+        task_md += f"  - runtime_seconds\n"
+        task_md += f"  - parameters_used\n"
+
+        task_md += f"\n### Success Criteria\n"
+        task_md += f"- Model trains without errors\n"
+        task_md += f"- Validation score is computed\n"
+        task_md += f"- Submission file is in correct format\n"
+        task_md += f"- Results are saved to JSON\n"
+        task_md += f"- Completion marker created: `DONE_{exp_id}`\n"
+
+        return task_md
 
     def _generate_task_markdown(self, exp_id: str, iteration: int, strategy: str, params: dict, comp_info: CompetitionInfo) -> str:
         """Generate task markdown for the WAA."""
