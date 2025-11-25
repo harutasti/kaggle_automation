@@ -1,5 +1,6 @@
 import os
 import json
+import re
 import datetime
 from typing import List, Dict, Optional
 
@@ -121,6 +122,25 @@ class ResultAggregatorDatabase(BaseComponent):
                 dst_absolute = os.path.join(self.results_base_dir, dst_relative)
                 copy_file(src_path, dst_absolute)
                 collected_files_relative.append(dst_relative)
+
+        # Copy JSONL output to codex-responses/WAA/ directory
+        codex_output_jsonl = os.path.join(worktree_path, f"codex_output_{exp_id}.jsonl")
+        if os.path.exists(codex_output_jsonl):
+            # Parse experiment_id for naming: response-{parallel_id}-{iteration}.jsonl
+            match = re.match(r'iter(\d+)_exp(\d+)_', exp_id)
+            if match:
+                iteration_num, parallel_id = match.groups()
+                jsonl_filename = f"response-{parallel_id}-{iteration_num}.jsonl"
+            else:
+                jsonl_filename = f"response-{exp_id}.jsonl"
+
+            codex_responses_waa_dir = os.path.join(
+                self.experiment_run_dir, "codex-responses", "WAA"
+            )
+            ensure_dir(codex_responses_waa_dir)
+            dst_path = os.path.join(codex_responses_waa_dir, jsonl_filename)
+            copy_file(codex_output_jsonl, dst_path)
+            self.logger.info(f"Copied JSONL output to {dst_path}")
 
         # Build ExperimentResult (start/end times are placeholder values)
         # TODO: Pull hypothesis info to populate iteration, strategy_name, parameters.

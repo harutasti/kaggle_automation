@@ -13,6 +13,7 @@ Directly calls `codex exec` with appropriate prompts for each component.
 import json
 import logging
 import os
+import re
 import subprocess
 import time
 from dataclasses import dataclass, field
@@ -50,6 +51,7 @@ def execute_codex_experiment(
     task_markdown_path: str | Path,
     worktree_path: str | Path,
     experiment_id: str,
+    codex_responses_dir: str | Path | None = None,
     timeout: int = 3600,
     dry_run: bool = False,
     logger: Optional[logging.Logger] = None
@@ -61,6 +63,7 @@ def execute_codex_experiment(
         task_markdown_path: Path to the task instruction markdown file
         worktree_path: Working directory (Git worktree) for the experiment
         experiment_id: Unique experiment identifier
+        codex_responses_dir: Directory for JSONL output logs (e.g., experiment_run_dir/codex-responses)
         timeout: Maximum execution time in seconds (default: 1 hour)
         logger: Optional logger instance
 
@@ -69,8 +72,8 @@ def execute_codex_experiment(
 
     The function:
     1. Reads the task markdown as instruction
-    2. Runs `codex exec` in the worktree directory
-    3. Saves output to codex_output_{exp_id}.md
+    2. Runs `codex exec --json` in the worktree directory
+    3. Saves JSONL output to codex-responses/WAA/response-{parallel_id}-{iteration}.jsonl
     4. Parses result_{exp_id}.json if created
     5. Returns structured result
     """
@@ -145,7 +148,7 @@ Please execute the experiment exactly as described above. Ensure you:
 
     try:
         proc = subprocess.run(
-            ["codex", "exec", "--skip-git-repo-check"],
+            ["codex", "exec", "--skip-git-repo-check", "--json"],
             input=stdin_input.encode("utf-8"),
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
@@ -157,9 +160,22 @@ Please execute the experiment exactly as described above. Ensure you:
         execution_time = time.time() - start_time
         raw_output = proc.stdout.decode("utf-8", errors="replace")
 
-        # Save output
-        output_file.parent.mkdir(parents=True, exist_ok=True)
-        output_file.write_text(raw_output, encoding="utf-8")
+        # Save JSONL output to codex-responses/WAA/
+        if codex_responses_dir:
+            codex_responses_dir = Path(codex_responses_dir)
+            # Parse experiment_id format: iter{N}_exp{M}_{uuid}
+            # Naming: response-{parallel_id}-{iteration}.jsonl (parallel-id first)
+            match = re.match(r'iter(\d+)_exp(\d+)_', experiment_id)
+            if match:
+                iteration, parallel_id = match.groups()
+                jsonl_filename = f"response-{parallel_id}-{iteration}.jsonl"
+            else:
+                jsonl_filename = f"response-{experiment_id}.jsonl"
+
+            jsonl_path = codex_responses_dir / "WAA" / jsonl_filename
+            jsonl_path.parent.mkdir(parents=True, exist_ok=True)
+            jsonl_path.write_text(raw_output, encoding="utf-8")
+            logger.info(f"Saved JSONL output to {jsonl_path}")
 
         logger.info(f"Codex completed in {execution_time:.2f}s (exit code: {proc.returncode})")
 
@@ -398,6 +414,7 @@ def execute_kse_hypothesis_generation(
     prompt_content: str,
     output_dir: str | Path,
     iteration: int,
+    codex_responses_dir: str | Path | None = None,
     num_hypotheses: int = 3,
     timeout: int = 600,
     dry_run: bool = False,
@@ -410,6 +427,7 @@ def execute_kse_hypothesis_generation(
         prompt_content: Filled KSE prompt with competition/dataset/system info
         output_dir: Directory to save hypothesis markdown files
         iteration: Current iteration number
+        codex_responses_dir: Directory for JSONL output logs (e.g., experiment_run_dir/codex-responses)
         num_hypotheses: Number of hypotheses to generate
         timeout: Maximum execution time in seconds (default: 10 minutes)
         logger: Optional logger instance
@@ -471,7 +489,7 @@ After creating all files, create a summary file named 'kse_summary_iter{iteratio
 
     try:
         proc = subprocess.run(
-            ["codex", "exec", "--skip-git-repo-check"],
+            ["codex", "exec", "--skip-git-repo-check", "--json"],
             input=stdin_input.encode("utf-8"),
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
@@ -483,8 +501,14 @@ After creating all files, create a summary file named 'kse_summary_iter{iteratio
         execution_time = time.time() - start_time
         raw_output = proc.stdout.decode("utf-8", errors="replace")
 
-        # Save output
-        output_file.write_text(raw_output, encoding="utf-8")
+        # Save JSONL output to codex-responses/KSE/
+        if codex_responses_dir:
+            codex_responses_dir_path = Path(codex_responses_dir)
+            jsonl_path = codex_responses_dir_path / "KSE" / f"response-{iteration}.jsonl"
+            jsonl_path.parent.mkdir(parents=True, exist_ok=True)
+            jsonl_path.write_text(raw_output, encoding="utf-8")
+            logger.info(f"Saved JSONL output to {jsonl_path}")
+
         logger.info(f"KSE completed in {execution_time:.2f}s")
 
         # Parse generated hypotheses
@@ -561,6 +585,7 @@ def execute_pa_analysis(
     results_data: List[Dict[str, Any]] | str,
     iteration: int,
     output_dir: str | Path,
+    codex_responses_dir: str | Path | None = None,
     timeout: int = 300,
     dry_run: bool = False,
     logger: Optional[logging.Logger] = None
@@ -572,6 +597,7 @@ def execute_pa_analysis(
         results_data: List of experiment results to analyze
         iteration: Current iteration number
         output_dir: Directory to save analysis report
+        codex_responses_dir: Directory for JSONL output logs (e.g., experiment_run_dir/codex-responses)
         timeout: Maximum execution time in seconds (default: 5 minutes)
         logger: Optional logger instance
 
@@ -659,7 +685,7 @@ Create two output files:
 
     try:
         proc = subprocess.run(
-            ["codex", "exec", "--skip-git-repo-check"],
+            ["codex", "exec", "--skip-git-repo-check", "--json"],
             input=stdin_input.encode("utf-8"),
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
@@ -671,8 +697,14 @@ Create two output files:
         execution_time = time.time() - start_time
         raw_output = proc.stdout.decode("utf-8", errors="replace")
 
-        # Save output
-        output_file.write_text(raw_output, encoding="utf-8")
+        # Save JSONL output to codex-responses/PA/
+        if codex_responses_dir:
+            codex_responses_dir_path = Path(codex_responses_dir)
+            jsonl_path = codex_responses_dir_path / "PA" / f"response-{iteration}.jsonl"
+            jsonl_path.parent.mkdir(parents=True, exist_ok=True)
+            jsonl_path.write_text(raw_output, encoding="utf-8")
+            logger.info(f"Saved JSONL output to {jsonl_path}")
+
         logger.info(f"PA completed in {execution_time:.2f}s")
 
         # Parse analysis summary

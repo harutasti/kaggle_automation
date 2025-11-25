@@ -182,11 +182,16 @@ class PerformanceAnalyzer(BaseComponent):
 
             # Execute Codex
             self.logger.info(f"Calling Codex for PA analysis (iteration {iteration})")
+
+            # Get codex-responses directory for JSONL output
+            codex_responses_dir = os.path.join(self.experiment_run_dir, "codex-responses")
+
             codex_result = execute_codex(
                 mode=CodexMode.PA,
                 results_data=prompt,  # PA expects results_data, not prompt
                 output_dir=self.analysis_dir,
                 iteration=iteration,
+                codex_responses_dir=codex_responses_dir,
                 dry_run=self.dry_run,
                 timeout=self.config.get("pa_codex_timeout", 180)
             )

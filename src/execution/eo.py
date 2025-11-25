@@ -144,9 +144,9 @@ Please execute the experiment exactly as described above. Ensure you:
 2. Create the DONE_{exp_id} file when complete
 3. Save predictions to submission_{exp_id}.csv
 """
-            # Start codex exec in background
+            # Start codex exec in background with --json flag for JSONL output
             codex_config = self.config.get("codex", {})
-            cmd = ['codex', 'exec']
+            cmd = ['codex', 'exec', '--json']
 
             if codex_config.get("skip_confirmation", True):
                 cmd.append('--skip-git-repo-check')
@@ -206,6 +206,9 @@ Please execute the experiment exactly as described above. Ensure you:
                      except Exception as e:
                           self.logger.error(f"Error terminating process {exp_id}: {e}")
 
+                # Save JSONL output from Codex process
+                self._save_codex_jsonl_output(exp_id, process, worktree_path)
+
                 self.logger.info(f"Experiment {exp_id} completed.")
                 completed_ids.append(exp_id)
                 # Prefer to clean worktree after RAD collects results
@@ -213,6 +216,8 @@ Please execute the experiment exactly as described above. Ensure you:
             elif process.poll() is not None:  # Process has terminated
                  # No DONE file but process exited -> likely abnormal termination
                  self.logger.error(f"Process for experiment {exp_id} (PID: {process.pid}) terminated unexpectedly without creating DONE file. Marking as failed.")
+                 # Save JSONL output even for failed experiments (for debugging)
+                 self._save_codex_jsonl_output(exp_id, process, worktree_path)
                  # Create failure marker for downstream handling
                  with open(done_file_path, 'w') as f:
                      f.write("UNEXPECTED_FAILURE")
@@ -226,6 +231,23 @@ Please execute the experiment exactly as described above. Ensure you:
         #     self.logger.info(f"Detected completed experiments: {completed_ids}")
         # self._log_end(method_name, result=completed_ids)
         return completed_ids
+
+    def _save_codex_jsonl_output(self, exp_id: str, process: subprocess.Popen, worktree_path: str):
+        """Save JSONL output from completed Codex process to worktree directory."""
+        if self.execution_mode != "codex":
+            return  # Only for Codex mode
+
+        try:
+            # Read stdout from the process (contains JSONL output)
+            if process.stdout:
+                jsonl_output = process.stdout.read()
+                if jsonl_output:
+                    jsonl_path = os.path.join(worktree_path, f"codex_output_{exp_id}.jsonl")
+                    with open(jsonl_path, 'w', encoding='utf-8') as f:
+                        f.write(jsonl_output)
+                    self.logger.info(f"Saved JSONL output to {jsonl_path}")
+        except Exception as e:
+            self.logger.warning(f"Failed to save JSONL output for {exp_id}: {e}")
 
     def cleanup_worktree(self, exp_id: str, worktree_path: str):
         """Clean up the specified worktree."""

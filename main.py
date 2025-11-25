@@ -102,6 +102,11 @@ def main():
         ensure_dir(os.path.join(experiment_run_dir, "hypotheses"))
         ensure_dir(os.path.join(experiment_run_dir, "analysis"))
         ensure_dir(os.path.join(experiment_run_dir, "kaggle_data"))
+        # Create codex-responses directories for JSONL output logging
+        ensure_dir(os.path.join(experiment_run_dir, "codex-responses"))
+        ensure_dir(os.path.join(experiment_run_dir, "codex-responses", "KSE"))
+        ensure_dir(os.path.join(experiment_run_dir, "codex-responses", "WAA"))
+        ensure_dir(os.path.join(experiment_run_dir, "codex-responses", "PA"))
     else:
         logger.info(f"DRY-RUN MODE: Would create directories at: {experiment_run_dir}")
 

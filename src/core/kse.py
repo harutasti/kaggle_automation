@@ -230,12 +230,16 @@ class KnowledgeStrategyEngine(BaseComponent):
         # Execute Codex to generate hypotheses
         self.logger.info(f"Calling Codex for KSE hypothesis generation (iteration {iteration})")
 
+        # Get codex-responses directory for JSONL output
+        codex_responses_dir = os.path.join(self.experiment_run_dir, "codex-responses")
+
         try:
             codex_result = execute_codex(
                 mode=CodexMode.KSE,
                 prompt_content=filled_prompt,
                 output_dir=self.hypothesis_dir,
                 iteration=iteration,
+                codex_responses_dir=codex_responses_dir,
                 num_hypotheses=num_hypotheses,
                 dry_run=self.config.get("dry_run", False),
                 timeout=self.codex_timeout
