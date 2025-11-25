@@ -1,9 +1,13 @@
 #!/usr/bin/env python3
 """
-Simple Codex executor optimized for AutoKaggler experiments.
+Unified Codex executor for AutoKaggle system.
 
-Directly calls `codex exec` to run ML experiments using task markdown files.
-No complex wrappers, sessions, or permissions - just execute and get results.
+Handles all Codex invocations:
+- KSE: Knowledge Strategy Engine (hypothesis generation)
+- WAA: Worker AI Agent (experiment execution)
+- PA: Performance Analyzer (results analysis)
+
+Directly calls `codex exec` with appropriate prompts for each component.
 """
 
 import json
@@ -14,20 +18,31 @@ import time
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
-from typing import Optional
+from typing import Optional, List, Dict, Any, Literal
+from enum import Enum
+
+
+class CodexMode(Enum):
+    """Types of Codex executions"""
+    KSE = "kse"  # Knowledge Strategy Engine - hypothesis generation
+    WAA = "waa"  # Worker AI Agent - experiment execution
+    PA = "pa"    # Performance Analyzer - results analysis
 
 
 @dataclass
 class CodexResult:
     """Result from Codex execution"""
     success: bool
-    experiment_id: str
+    mode: CodexMode
     execution_time: float
     raw_output: str = ""
     error: Optional[str] = None
     error_type: Optional[str] = None
     output_file: Optional[Path] = None
     result_data: Optional[dict] = None
+    experiment_id: Optional[str] = None  # For WAA mode
+    hypotheses: Optional[List[Dict]] = None  # For KSE mode
+    analysis: Optional[Dict] = None  # For PA mode
     timestamp: datetime = field(default_factory=datetime.now)
 
 
@@ -70,6 +85,7 @@ def execute_codex_experiment(
     if not task_markdown_path.exists():
         return CodexResult(
             success=False,
+            mode=CodexMode.WAA,
             experiment_id=experiment_id,
             execution_time=0.0,
             error=f"Task markdown not found: {task_markdown_path}",
@@ -365,6 +381,353 @@ def execute_with_retry(
     return result
 
 
+def execute_kse_hypothesis_generation(
+    prompt_content: str,
+    output_dir: str | Path,
+    iteration: int,
+    num_hypotheses: int = 3,
+    timeout: int = 600,
+    logger: Optional[logging.Logger] = None
+) -> CodexResult:
+    """
+    Execute KSE hypothesis generation using Codex.
+
+    Args:
+        prompt_content: Filled KSE prompt with competition/dataset/system info
+        output_dir: Directory to save hypothesis markdown files
+        iteration: Current iteration number
+        num_hypotheses: Number of hypotheses to generate
+        timeout: Maximum execution time in seconds (default: 10 minutes)
+        logger: Optional logger instance
+
+    Returns:
+        CodexResult with generated hypotheses
+    """
+    output_dir = Path(output_dir)
+    output_file = output_dir / f"kse_output_iter{iteration}.md"
+
+    if logger is None:
+        logger = logging.getLogger("AutoKaggle.CodexExecutor.KSE")
+
+    # Ensure output directory exists
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    # Prepare instruction for Codex
+    stdin_input = f"""You are the Knowledge Strategy Engine (KSE) for AutoKaggle.
+
+{prompt_content}
+
+IMPORTANT: Generate exactly {num_hypotheses} hypothesis markdown files.
+
+For each hypothesis, create a separate file named:
+- iter{iteration}_exp1_<unique_id>_hypothesis.md
+- iter{iteration}_exp2_<unique_id>_hypothesis.md
+- iter{iteration}_exp3_<unique_id>_hypothesis.md
+
+Each file should follow the exact template structure provided in the prompt above.
+
+After creating all files, create a summary file named 'kse_summary_iter{iteration}.json' with:
+{{
+    "iteration": {iteration},
+    "hypotheses": [
+        {{
+            "experiment_id": "iter{iteration}_exp1_<id>",
+            "strategy": "strategy_name",
+            "category": "category_type",
+            "file": "path/to/hypothesis.md"
+        }},
+        ...
+    ]
+}}
+"""
+
+    logger.info(f"Executing KSE for iteration {iteration} ({num_hypotheses} hypotheses)")
+    start_time = time.time()
+
+    try:
+        proc = subprocess.run(
+            ["codex", "exec", "--skip-git-repo-check"],
+            input=stdin_input.encode("utf-8"),
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            cwd=str(output_dir),
+            timeout=timeout,
+            check=False
+        )
+
+        execution_time = time.time() - start_time
+        raw_output = proc.stdout.decode("utf-8", errors="replace")
+
+        # Save output
+        output_file.write_text(raw_output, encoding="utf-8")
+        logger.info(f"KSE completed in {execution_time:.2f}s")
+
+        # Parse generated hypotheses
+        summary_file = output_dir / f"kse_summary_iter{iteration}.json"
+
+        if summary_file.exists():
+            try:
+                with open(summary_file, 'r') as f:
+                    summary_data = json.load(f)
+
+                return CodexResult(
+                    success=True,
+                    mode=CodexMode.KSE,
+                    execution_time=execution_time,
+                    raw_output=raw_output,
+                    output_file=output_file,
+                    hypotheses=summary_data.get("hypotheses", [])
+                )
+            except Exception as e:
+                logger.error(f"Failed to parse KSE summary: {e}")
+
+        # If no summary, try to find generated hypothesis files
+        hypothesis_files = list(output_dir.glob(f"iter{iteration}_exp*_hypothesis.md"))
+
+        if hypothesis_files:
+            hypotheses = []
+            for i, file in enumerate(hypothesis_files, 1):
+                hypotheses.append({
+                    "experiment_id": file.stem.replace("_hypothesis", ""),
+                    "file": str(file)
+                })
+
+            return CodexResult(
+                success=True,
+                mode=CodexMode.KSE,
+                execution_time=execution_time,
+                raw_output=raw_output,
+                output_file=output_file,
+                hypotheses=hypotheses
+            )
+
+        return CodexResult(
+            success=False,
+            mode=CodexMode.KSE,
+            execution_time=execution_time,
+            raw_output=raw_output,
+            output_file=output_file,
+            error="No hypotheses generated",
+            error_type="NO_OUTPUT"
+        )
+
+    except subprocess.TimeoutExpired:
+        execution_time = time.time() - start_time
+        return CodexResult(
+            success=False,
+            mode=CodexMode.KSE,
+            execution_time=execution_time,
+            error=f"KSE timed out after {timeout}s",
+            error_type="TIMEOUT"
+        )
+
+    except Exception as e:
+        execution_time = time.time() - start_time
+        return CodexResult(
+            success=False,
+            mode=CodexMode.KSE,
+            execution_time=execution_time,
+            error=f"KSE execution failed: {e}",
+            error_type="EXECUTION_ERROR"
+        )
+
+
+def execute_pa_analysis(
+    results_data: List[Dict[str, Any]],
+    iteration: int,
+    output_dir: str | Path,
+    timeout: int = 300,
+    logger: Optional[logging.Logger] = None
+) -> CodexResult:
+    """
+    Execute Performance Analysis using Codex.
+
+    Args:
+        results_data: List of experiment results to analyze
+        iteration: Current iteration number
+        output_dir: Directory to save analysis report
+        timeout: Maximum execution time in seconds (default: 5 minutes)
+        logger: Optional logger instance
+
+    Returns:
+        CodexResult with analysis report
+    """
+    output_dir = Path(output_dir)
+    output_file = output_dir / f"pa_output_iter{iteration}.md"
+
+    if logger is None:
+        logger = logging.getLogger("AutoKaggle.CodexExecutor.PA")
+
+    # Ensure output directory exists
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    # Prepare results summary for analysis
+    results_summary = json.dumps(results_data, indent=2)
+
+    # Prepare instruction for Codex
+    stdin_input = f"""You are the Performance Analyzer (PA) for AutoKaggle.
+
+Analyze the following experiment results from iteration {iteration}:
+
+```json
+{results_summary}
+```
+
+Please provide a comprehensive analysis including:
+
+1. **Performance Summary**
+   - Best performing experiment (ID and score)
+   - Worst performing experiment
+   - Average score across all experiments
+   - Standard deviation
+
+2. **Pattern Analysis**
+   - What strategies worked well?
+   - What strategies failed?
+   - Common patterns in successful experiments
+   - Common patterns in failed experiments
+
+3. **Feature Importance Insights**
+   - Most important features across successful models
+   - Features that may be causing overfitting
+
+4. **Recommendations for Next Iteration**
+   - High priority: Strategies to exploit
+   - Medium priority: Strategies to explore
+   - Low priority: Strategies to avoid
+
+5. **Specific Improvements**
+   - Hyperparameter adjustments
+   - Feature engineering suggestions
+   - Model architecture changes
+
+Create two output files:
+
+1. `analysis_iter{iteration}.md` - Detailed markdown report
+2. `pa_summary_iter{iteration}.json` - Structured summary with:
+   {{
+       "iteration": {iteration},
+       "best_score": <score>,
+       "best_experiment": "<exp_id>",
+       "average_score": <score>,
+       "success_rate": <percentage>,
+       "recommended_strategies": ["strategy1", "strategy2", ...],
+       "avoid_strategies": ["strategy1", ...],
+       "key_insights": ["insight1", "insight2", ...]
+   }}
+"""
+
+    logger.info(f"Executing PA for iteration {iteration} ({len(results_data)} results)")
+    start_time = time.time()
+
+    try:
+        proc = subprocess.run(
+            ["codex", "exec", "--skip-git-repo-check"],
+            input=stdin_input.encode("utf-8"),
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            cwd=str(output_dir),
+            timeout=timeout,
+            check=False
+        )
+
+        execution_time = time.time() - start_time
+        raw_output = proc.stdout.decode("utf-8", errors="replace")
+
+        # Save output
+        output_file.write_text(raw_output, encoding="utf-8")
+        logger.info(f"PA completed in {execution_time:.2f}s")
+
+        # Parse analysis summary
+        summary_file = output_dir / f"pa_summary_iter{iteration}.json"
+        analysis_file = output_dir / f"analysis_iter{iteration}.md"
+
+        analysis_data = None
+        if summary_file.exists():
+            try:
+                with open(summary_file, 'r') as f:
+                    analysis_data = json.load(f)
+            except Exception as e:
+                logger.error(f"Failed to parse PA summary: {e}")
+
+        # Check if analysis report was created
+        if analysis_file.exists() or analysis_data:
+            return CodexResult(
+                success=True,
+                mode=CodexMode.PA,
+                execution_time=execution_time,
+                raw_output=raw_output,
+                output_file=output_file,
+                analysis=analysis_data or {"report_created": True}
+            )
+
+        return CodexResult(
+            success=False,
+            mode=CodexMode.PA,
+            execution_time=execution_time,
+            raw_output=raw_output,
+            output_file=output_file,
+            error="No analysis report generated",
+            error_type="NO_OUTPUT"
+        )
+
+    except subprocess.TimeoutExpired:
+        execution_time = time.time() - start_time
+        return CodexResult(
+            success=False,
+            mode=CodexMode.PA,
+            execution_time=execution_time,
+            error=f"PA timed out after {timeout}s",
+            error_type="TIMEOUT"
+        )
+
+    except Exception as e:
+        execution_time = time.time() - start_time
+        return CodexResult(
+            success=False,
+            mode=CodexMode.PA,
+            execution_time=execution_time,
+            error=f"PA execution failed: {e}",
+            error_type="EXECUTION_ERROR"
+        )
+
+
+def execute_codex(
+    mode: CodexMode,
+    **kwargs
+) -> CodexResult:
+    """
+    Unified interface for all Codex executions.
+
+    Args:
+        mode: Type of Codex execution (KSE, WAA, or PA)
+        **kwargs: Mode-specific arguments
+
+    Returns:
+        CodexResult appropriate for the mode
+    """
+    if mode == CodexMode.WAA:
+        # WAA requires: task_markdown_path, worktree_path, experiment_id
+        return execute_codex_experiment(**kwargs)
+
+    elif mode == CodexMode.KSE:
+        # KSE requires: prompt_content, output_dir, iteration, num_hypotheses
+        return execute_kse_hypothesis_generation(**kwargs)
+
+    elif mode == CodexMode.PA:
+        # PA requires: results_data, iteration, output_dir
+        return execute_pa_analysis(**kwargs)
+
+    else:
+        return CodexResult(
+            success=False,
+            mode=mode,
+            execution_time=0.0,
+            error=f"Unknown Codex mode: {mode}",
+            error_type="INVALID_MODE"
+        )
+
+
 # Example usage
 if __name__ == "__main__":
     # Setup logging
@@ -373,21 +736,72 @@ if __name__ == "__main__":
         format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
     )
 
-    # Example: Execute a test experiment
-    result = execute_codex_experiment(
+    print("=" * 80)
+    print("CODEX EXECUTOR EXAMPLES")
+    print("=" * 80)
+
+    # Example 1: KSE - Generate hypotheses
+    print("\n1. KSE - Hypothesis Generation")
+    print("-" * 40)
+
+    kse_prompt = """
+    Competition: Titanic
+    Evaluation Metric: Accuracy
+    Dataset: 891 training samples, 12 features
+
+    Generate 3 diverse ML experiment hypotheses.
+    """
+
+    kse_result = execute_codex(
+        mode=CodexMode.KSE,
+        prompt_content=kse_prompt,
+        output_dir="./test_kse_output",
+        iteration=0,
+        num_hypotheses=3,
+        timeout=60  # 1 minute for demo
+    )
+
+    print(f"KSE Result: {kse_result.success}")
+    if kse_result.hypotheses:
+        print(f"Generated {len(kse_result.hypotheses)} hypotheses")
+
+    # Example 2: WAA - Execute experiment
+    print("\n2. WAA - Experiment Execution")
+    print("-" * 40)
+
+    waa_result = execute_codex(
+        mode=CodexMode.WAA,
         task_markdown_path="experiments/hypotheses/iter0_exp1_test_task.md",
         worktree_path="experiments/worktrees/iter0_exp1_test",
         experiment_id="iter0_exp1_test",
-        timeout=300  # 5 minutes for testing
+        timeout=300  # 5 minutes
     )
 
-    print(f"\nExecution Result:")
-    print(f"  Success: {result.success}")
-    print(f"  Time: {result.execution_time:.2f}s")
+    print(f"WAA Result: {waa_result.success}")
+    if waa_result.success and waa_result.result_data:
+        print(f"Score: {waa_result.result_data.get('score')}")
 
-    if result.success:
-        print(f"  Score: {result.result_data.get('score')}")
-        print(f"  Output: {result.output_file}")
-    else:
-        print(f"  Error: {result.error}")
-        print(f"  Error Type: {result.error_type}")
+    # Example 3: PA - Performance Analysis
+    print("\n3. PA - Performance Analysis")
+    print("-" * 40)
+
+    sample_results = [
+        {"experiment_id": "exp1", "score": 0.85, "strategy": "LightGBM"},
+        {"experiment_id": "exp2", "score": 0.82, "strategy": "XGBoost"},
+        {"experiment_id": "exp3", "score": 0.79, "strategy": "RandomForest"}
+    ]
+
+    pa_result = execute_codex(
+        mode=CodexMode.PA,
+        results_data=sample_results,
+        iteration=0,
+        output_dir="./test_pa_output",
+        timeout=60  # 1 minute for demo
+    )
+
+    print(f"PA Result: {pa_result.success}")
+    if pa_result.analysis:
+        print(f"Analysis: {pa_result.analysis}")
+
+    print("\n" + "=" * 80)
+    print("Examples completed")
