@@ -9,8 +9,13 @@ from ..utils.file_utils import write_markdown, ensure_dir
 class PerformanceAnalyzer(BaseComponent):
     def __init__(self, config: dict):
         super().__init__(config)
-        self.analysis_dir = os.path.join(config.get("experiments_base_dir", "./experiments"), "analysis")
-        ensure_dir(self.analysis_dir)
+        # Use experiment_run_dir if available (timestamped), otherwise fall back to experiments_base_dir
+        self.experiment_run_dir = config.get("experiment_run_dir", config.get("experiments_base_dir", "./experiments"))
+        self.analysis_dir = os.path.join(self.experiment_run_dir, "analysis")
+
+        # Only ensure directory if not in dry-run mode
+        if not config.get("dry_run", False):
+            ensure_dir(self.analysis_dir)
 
     def analyze_results(self, iteration: int, results: List[ExperimentResult]) -> AnalysisResult:
         """Analyze the current iteration's results (and optionally prior ones)."""

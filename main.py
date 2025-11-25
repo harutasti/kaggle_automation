@@ -2,6 +2,7 @@ import os
 import sys
 import json
 import argparse
+from datetime import datetime
 
 project_root = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, project_root)
@@ -75,13 +76,34 @@ def main():
     config['skip_confirmations'] = skip_confirmations
     config['dry_run'] = dry_run
 
-    exp_base_dir = config.get("experiments_base_dir", "./experiments")
-    ensure_dir(exp_base_dir)
-    ensure_dir(os.path.join(exp_base_dir, "worktrees"))
-    ensure_dir(os.path.join(exp_base_dir, "results"))
-    ensure_dir(os.path.join(exp_base_dir, "hypotheses"))
-    ensure_dir(os.path.join(exp_base_dir, "analysis"))
-    ensure_dir(os.path.join(exp_base_dir, "kaggle_data"))
+    # Get competition name and create timestamped directory
+    competition_name = config.get("competition", {}).get("name", "unknown")
+    if not competition_name:
+        # Fallback to old config format
+        competition_name = config.get("kaggle_competition_name", "unknown")
+
+    # Create timestamp for this experiment run
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+
+    # Build the experiment run directory path
+    experiments_root = config.get("experiments_base_dir", "./experiments")
+    experiment_run_dir = os.path.join(experiments_root, competition_name, timestamp)
+
+    # Update config with the run-specific directory
+    config['experiment_run_dir'] = experiment_run_dir
+    config['timestamp'] = timestamp
+
+    # Only create directories if not in dry-run mode
+    if not dry_run:
+        logger.info(f"Creating experiment directories at: {experiment_run_dir}")
+        ensure_dir(experiment_run_dir)
+        ensure_dir(os.path.join(experiment_run_dir, "worktrees"))
+        ensure_dir(os.path.join(experiment_run_dir, "results"))
+        ensure_dir(os.path.join(experiment_run_dir, "hypotheses"))
+        ensure_dir(os.path.join(experiment_run_dir, "analysis"))
+        ensure_dir(os.path.join(experiment_run_dir, "kaggle_data"))
+    else:
+        logger.info(f"DRY-RUN MODE: Would create directories at: {experiment_run_dir}")
 
 
     try:

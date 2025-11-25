@@ -14,10 +14,15 @@ from .codex_launcher import CodexExperimentLauncher
 class ExperimentOrchestrator(BaseComponent):
     def __init__(self, config: dict):
         super().__init__(config)
-        self.experiments_base_dir = config.get("experiments_base_dir", "./experiments")
-        self.worktree_base_dir = os.path.abspath(os.path.join(self.experiments_base_dir, "worktrees"))
+        # Use experiment_run_dir if available (timestamped), otherwise fall back to experiments_base_dir
+        self.experiment_run_dir = config.get("experiment_run_dir", config.get("experiments_base_dir", "./experiments"))
+        self.worktree_base_dir = os.path.abspath(os.path.join(self.experiment_run_dir, "worktrees"))
         self.wca_simulator_script = os.path.abspath(os.path.join(os.path.dirname(__file__), 'wca_simulator.py'))
-        ensure_dir(self.worktree_base_dir)
+
+        # Only ensure directory if not in dry-run mode
+        if not config.get("dry_run", False):
+            ensure_dir(self.worktree_base_dir)
+
         self.repo = self._get_git_repo()
         self.active_processes: Dict[str, Tuple[subprocess.Popen, str]] = {} # {exp_id: (process, worktree_path)}
 

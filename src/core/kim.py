@@ -17,8 +17,14 @@ class KaggleInterfaceManager(BaseComponent):
     def __init__(self, config: dict):
         super().__init__(config)
         self.competition_name = config.get("kaggle_competition_name", "dummy-competition")
-        self.download_dir = os.path.join(config.get("experiments_base_dir", "./experiments"), "kaggle_data")
-        ensure_dir(self.download_dir)
+        # Use experiment_run_dir if available (timestamped), otherwise fall back to experiments_base_dir
+        self.experiment_run_dir = config.get("experiment_run_dir", config.get("experiments_base_dir", "./experiments"))
+        self.download_dir = os.path.join(self.experiment_run_dir, "kaggle_data")
+
+        # Only ensure directory if not in dry-run mode
+        if not config.get("dry_run", False):
+            ensure_dir(self.download_dir)
+
         self.api = self._authenticate_kaggle()
         self.simulation_mode = config.get("simulation_mode", False)
         self.use_crawler = config.get("use_crawler", True)  # Default to using crawler

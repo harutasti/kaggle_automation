@@ -10,9 +10,15 @@ from ..utils.file_utils import ensure_dir, read_json, copy_file, move_file, writ
 class ResultAggregatorDatabase(BaseComponent):
     def __init__(self, config: dict):
         super().__init__(config)
-        self.results_base_dir = os.path.join(config.get("experiments_base_dir", "./experiments"), "results")
+        # Use experiment_run_dir if available (timestamped), otherwise fall back to experiments_base_dir
+        self.experiment_run_dir = config.get("experiment_run_dir", config.get("experiments_base_dir", "./experiments"))
+        self.results_base_dir = os.path.join(self.experiment_run_dir, "results")
         self.manifest_file = os.path.join(self.results_base_dir, "results_manifest.json")
-        ensure_dir(self.results_base_dir)
+
+        # Only ensure directory if not in dry-run mode
+        if not config.get("dry_run", False):
+            ensure_dir(self.results_base_dir)
+
         self.results_cache: Dict[str, ExperimentResult] = self._load_manifest()
 
     def _load_manifest(self) -> Dict[str, ExperimentResult]:

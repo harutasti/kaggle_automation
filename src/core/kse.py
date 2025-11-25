@@ -16,8 +16,14 @@ class KnowledgeStrategyEngine(BaseComponent):
     def __init__(self, config: dict):
         super().__init__(config)
         self.strategies = ["SimpleGBM", "FeatureEngV1_LGBM", "BasicNN", "RandomForest_HyperOpt"]
-        self.hypothesis_dir = os.path.join(config.get("experiments_base_dir", "./experiments"), "hypotheses")
-        ensure_dir(self.hypothesis_dir)
+        # Use experiment_run_dir if available (timestamped), otherwise fall back to experiments_base_dir
+        self.experiment_run_dir = config.get("experiment_run_dir", config.get("experiments_base_dir", "./experiments"))
+        self.hypothesis_dir = os.path.join(self.experiment_run_dir, "hypotheses")
+
+        # Only ensure directory if not in dry-run mode
+        if not config.get("dry_run", False):
+            ensure_dir(self.hypothesis_dir)
+
         self.competition_name = config.get("kaggle_competition_name")
         self.use_crawler = config.get("use_crawler", True)
         self.discussion_strategies: List[Dict[str, Any]] = []
