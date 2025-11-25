@@ -1,6 +1,7 @@
 import os
 import time
 import json
+import sys
 from typing import Dict, List, Optional
 
 from .base_component import BaseComponent
@@ -9,12 +10,19 @@ from .kse import KnowledgeStrategyEngine
 from ..execution.eo import ExperimentOrchestrator
 from ..analysis.rad import ResultAggregatorDatabase
 from ..analysis.pa import PerformanceAnalyzer
+from ..utils.user_interaction import UserConfirmation
 from ..data_models import CompetitionInfo, ExperimentHypothesis, ExperimentResult, AnalysisResult
 
 class MasterControllerDecisionUnit(BaseComponent):
     def __init__(self, config_path: str):
         self.config = self._load_config(config_path)
         super().__init__(self.config)  # Initialize BaseComponent
+
+        # Initialize user confirmation handler
+        self.user_confirm = UserConfirmation(
+            skip_confirmations=self.config.get("skip_confirmations", False),
+            dry_run=self.config.get("dry_run", False)
+        )
 
         # Initialize components
         self.kim = KaggleInterfaceManager(self.config)
@@ -62,31 +70,64 @@ class MasterControllerDecisionUnit(BaseComponent):
         self._log_start("run_main_loop")
 
         # 1. Initialization: fetch competition info & download data
+        competition_name = self.config.get("competition", {}).get("name", "unknown")
+
+        # Confirm fetching competition info
+        if not self.user_confirm.confirm_kaggle_fetch(competition_name):
+            self.logger.info("User cancelled competition fetch. Exiting.")
+            self.stop_reason = "User cancelled operation"
+            return
+
         self.competition_info = self.kim.get_competition_info()
         if not self.competition_info:
             self.logger.critical("Failed to get competition info. Exiting.")
+            self.user_confirm.show_error("Failed to fetch competition information")
             return
+
+        self.user_confirm.show_success(f"Successfully fetched competition info for {competition_name}")
+
         if not self.kim.download_data_files(self.competition_info):
              self.logger.warning("Failed to download/verify data files. Continuing, but WAA might fail.")
+             self.user_confirm.show_warning("Failed to download/verify some data files")
              # Could decide to stop here
 
         # 2. Main loop
         while not self._should_stop():
             self.logger.info(f"--- Starting Iteration {self.current_iteration} ---")
+            self.user_confirm.show_status(f"Starting Iteration {self.current_iteration}", "bold cyan")
 
             # 2a. Generate hypotheses
+            # Confirm KSE hypothesis generation
+            if not self.user_confirm.confirm_kse_generation(self.current_iteration, self.wca_per_iteration):
+                self.logger.info("User cancelled hypothesis generation. Stopping.")
+                self.stop_reason = "User cancelled hypothesis generation"
+                break
+
             hypotheses = self._generate_hypotheses_for_iteration()
             if not hypotheses:
                  self.logger.warning(f"No hypotheses generated for iteration {self.current_iteration}. Stopping.")
+                 self.user_confirm.show_error("Failed to generate hypotheses")
                  self.stop_reason = "Hypothesis generation failed"
                  break
 
+            self.user_confirm.show_success(f"Generated {len(hypotheses)} hypotheses")
+
             # 2b. Launch experiments
+            # Confirm WAA experiment execution
+            experiment_ids = [h.experiment_id for h in hypotheses]
+            if not self.user_confirm.confirm_waa_execution(experiment_ids):
+                self.logger.info("User cancelled experiment execution. Stopping.")
+                self.stop_reason = "User cancelled experiment execution"
+                break
+
             launched_ids = self.eo.launch_experiments(hypotheses)
             if not launched_ids:
                  self.logger.warning(f"No experiments were launched for iteration {self.current_iteration}. Stopping.")
+                 self.user_confirm.show_error("Failed to launch experiments")
                  self.stop_reason = "Experiment launch failed"
                  break
+
+            self.user_confirm.show_success(f"Launched {len(launched_ids)} experiments")
 
             running_experiments = set(launched_ids)
             hypotheses_map = {h.experiment_id: h for h in hypotheses}  # Map ID -> hypothesis
@@ -123,10 +164,22 @@ class MasterControllerDecisionUnit(BaseComponent):
             self.all_results[self.current_iteration] = iteration_results
 
             # 2d. Performance analysis
-            analysis_result = self.pa.analyze_results(self.current_iteration, iteration_results)
+            if iteration_results:
+                # Confirm PA analysis
+                if not self.user_confirm.confirm_pa_analysis(self.current_iteration, len(iteration_results)):
+                    self.logger.info("User cancelled performance analysis. Skipping.")
+                    self.user_confirm.show_warning("Skipping performance analysis for this iteration")
+                    analysis_result = None
+                else:
+                    analysis_result = self.pa.analyze_results(self.current_iteration, iteration_results)
+                    self.user_confirm.show_success("Performance analysis completed")
+            else:
+                self.logger.warning("No results to analyze for this iteration")
+                analysis_result = None
 
             # 2e. Update overall best and check improvement
-            self._update_overall_best(analysis_result)
+            if analysis_result:
+                self._update_overall_best(analysis_result)
 
             self.current_iteration += 1
             self.logger.info(f"--- Finished Iteration {self.current_iteration - 1} ---")
@@ -214,10 +267,23 @@ class MasterControllerDecisionUnit(BaseComponent):
                  submission_file = next((f for f in best_result.result_files if 'submission' in f), None)
                  if submission_file:
                       submission_path_absolute = os.path.join(self.rad.results_base_dir, submission_file)
-                      self.logger.info(f"Simulating submission of: {submission_path_absolute}")
-                      self.kim.submit_predictions(submission_path_absolute, f"Final submission based on {self.best_experiment_id_overall}")
+                      # Confirm submission to Kaggle
+                      if self.user_confirm.confirm_score_submission(
+                          self.best_score_overall,
+                          self.best_experiment_id_overall
+                      ):
+                          self.logger.info(f"Submitting: {submission_path_absolute}")
+                          self.kim.submit_predictions(
+                              submission_path_absolute,
+                              f"Final submission based on {self.best_experiment_id_overall}"
+                          )
+                          self.user_confirm.show_success("Submission completed")
+                      else:
+                          self.logger.info("User skipped final submission")
+                          self.user_confirm.show_status("Submission skipped by user")
                  else:
                       self.logger.warning("Submission file not found for the best experiment.")
+                      self.user_confirm.show_warning("No submission file available for best experiment")
 
         else:
             self.logger.info("No successful experiments were completed.")

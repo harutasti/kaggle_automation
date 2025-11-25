@@ -44,6 +44,12 @@ Choose CV strategy based on data properties:
 
 ---
 
+## System Specifications
+
+{system_specifications_markdown}
+
+---
+
 ## Hypothesis Generation Requirements
 
 ### Diversity Quotas (MANDATORY)

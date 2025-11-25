@@ -55,6 +55,12 @@ Top stable features across successful models:
 
 ---
 
+## System Specifications
+
+{system_specifications_markdown}
+
+---
+
 ## Hypothesis Generation Strategy for Iteration {iteration_number}
 
 ### Mandatory Distribution

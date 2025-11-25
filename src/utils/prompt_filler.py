@@ -141,8 +141,11 @@ class PromptFiller:
         # Dataset statistics
         placeholders.update(dataset_analysis)
 
-        # System specifications
+        # System specifications (individual placeholders)
         placeholders.update(system_specs)
+
+        # Add full system specifications markdown
+        placeholders["system_specifications_markdown"] = self._get_system_specs_markdown(system_specs)
 
         # Community insights
         placeholders["discussion_winning_approaches"] = self._format_list(
@@ -386,6 +389,57 @@ class PromptFiller:
         if not items:
             return f"{bullet}[ASSUMED: No items available]"
         return "\n".join(f"{bullet}{item}" for item in items)
+
+    def _get_system_specs_markdown(self, system_specs: Dict[str, Any]) -> str:
+        """Generate markdown for system specifications section."""
+        from src.utils.system_specs import SystemSpecsDetector
+
+        # Use the comprehensive markdown from SystemSpecsDetector
+        detector = SystemSpecsDetector()
+        # Update the detector's specs with the provided ones
+        detector.specs = system_specs
+
+        # Generate comprehensive markdown
+        comprehensive_md = detector.to_markdown()
+
+        # Remove the duplicate "## System Specifications" header if present
+        # since the prompt template already has it
+        if comprehensive_md.startswith("## System Specifications"):
+            comprehensive_md = comprehensive_md.replace("## System Specifications\n\n", "", 1)
+
+        # Add Implications for Hypothesis Generation section
+        md_lines = comprehensive_md.split('\n')
+
+        # Add implications section
+        md_lines.append("\n### Implications for Hypothesis Generation")
+
+        gpu_available = system_specs.get('gpu_available', 'No')
+        if gpu_available == 'Yes':
+            md_lines.append("- GPU acceleration available: Can consider deep learning models")
+            md_lines.append("- Faster training times allow for more complex architectures")
+            md_lines.append("- Can handle larger batch sizes for neural networks")
+        else:
+            md_lines.append("- CPU-only: Focus on efficient algorithms (tree-based, linear models)")
+            md_lines.append("- Avoid very deep neural networks due to training time constraints")
+            md_lines.append("- Consider parallelization for tree-based models")
+
+        memory_gb = system_specs.get('memory_gb', '8')
+        if isinstance(memory_gb, str):
+            memory_gb = float(memory_gb.replace('[ASSUMED: ', '').replace(']', ''))
+        else:
+            memory_gb = float(memory_gb)
+
+        if memory_gb >= 32:
+            md_lines.append("- High memory available: Can handle large datasets in-memory")
+            md_lines.append("- Can use memory-intensive feature engineering")
+        elif memory_gb >= 16:
+            md_lines.append("- Moderate memory: Standard batch sizes and model complexity")
+            md_lines.append("- Balance between performance and memory usage")
+        else:
+            md_lines.append("- Limited memory: Use memory-efficient techniques, reduce batch sizes")
+            md_lines.append("- Consider incremental learning approaches")
+
+        return "\n".join(md_lines)
 
     def _format_benchmarks(self, benchmarks: Dict[str, Any]) -> str:
         """Format benchmark scores as markdown."""

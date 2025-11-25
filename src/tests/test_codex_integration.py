@@ -17,7 +17,8 @@ import tempfile
 from pathlib import Path
 
 # Add project root to path
-sys.path.insert(0, str(Path(__file__).parent.parent))
+# Go up two levels from src/tests to get to the project root
+sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
 from src.utils.codex_executor import execute_codex_experiment, execute_with_retry
 from src.utils.file_utils import ensure_dir

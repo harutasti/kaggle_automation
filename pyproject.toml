@@ -10,4 +10,7 @@ dependencies = [
     "crawl4ai>=0.6.3",
     "tqdm>=4.67.1",
     "python-dateutil>=2.9.0.post0",
+    "pandas>=2.3.3",
+    "numpy>=2.3.5",
+    "rich>=14.2.0",
 ]

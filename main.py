@@ -20,10 +20,29 @@ def main():
         default=DEFAULT_CONFIG_FILE,
         help=f"Path to configuration file (default: {DEFAULT_CONFIG_FILE})"
     )
+    parser.add_argument(
+        "--skip-confirmations", "-y",
+        action="store_true",
+        default=False,
+        help="Skip all confirmation prompts (run in automatic mode)"
+    )
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        default=False,
+        help="Run in dry-run mode (skip actual Codex executions)"
+    )
     args = parser.parse_args()
 
     config_file = args.config
+    skip_confirmations = args.skip_confirmations
+    dry_run = args.dry_run
+
     print(f"Starting AutoKaggle with config: {config_file}")
+    if skip_confirmations:
+        print("Running in automatic mode (skipping all confirmations)")
+    if dry_run:
+        print("Running in dry-run mode (skipping Codex executions)")
 
     try:
         with open(config_file, 'r', encoding='utf-8') as f:
@@ -51,6 +70,10 @@ def main():
 
     # Add system specs to config for components to access
     config['system_specs'] = system_specs
+
+    # Add command-line flags to config
+    config['skip_confirmations'] = skip_confirmations
+    config['dry_run'] = dry_run
 
     exp_base_dir = config.get("experiments_base_dir", "./experiments")
     ensure_dir(exp_base_dir)
