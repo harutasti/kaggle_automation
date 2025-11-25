@@ -505,7 +505,9 @@ class KnowledgeStrategyEngine(BaseComponent):
         task_md += f"- Results are saved to JSON\n"
         task_md += f"- Completion marker created: `DONE_{exp_id}`\n"
 
-        return task_md
+        # Inject uv requirements at the beginning
+        uv_requirements = self._get_uv_requirements_section()
+        return uv_requirements + "\n\n" + task_md
 
     def _generate_task_markdown(self, exp_id: str, iteration: int, strategy: str, params: dict, comp_info: CompetitionInfo) -> str:
         """Generate task markdown for the WAA."""
@@ -556,4 +558,23 @@ Based on discussion analysis, here are relevant insights for this strategy:
 
 **Important:** Ensure all file paths for output are relative to the root of this Git worktree. Use the provided `experiment_id` (`{exp_id}`) in filenames.
 """
-        return markdown.strip()
+        # Inject uv requirements at the beginning
+        uv_requirements = self._get_uv_requirements_section()
+        return uv_requirements + "\n\n" + markdown.strip()
+
+    def _get_uv_requirements_section(self) -> str:
+        """Return strict uv usage requirements for WAA prompts."""
+        return '''## CRITICAL: Python Environment Requirements
+
+**YOU MUST FOLLOW THESE INSTRUCTIONS EXACTLY:**
+
+1. **Use the current virtual environment** - DO NOT create a new virtual environment
+2. **Install packages with `uv add <package-name>`** - NEVER use `pip install`
+3. **Run scripts with `uv run xxx.py`** - NEVER use `python xxx.py`
+
+Examples:
+- To install a package: `uv add torch`
+- To run a script: `uv run train.py`
+- To run with arguments: `uv run train.py --epochs 10`
+
+**VIOLATION OF THESE RULES WILL CAUSE EXPERIMENT FAILURE.**'''

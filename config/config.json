@@ -9,13 +9,14 @@
   "experiments_base_dir": "./experiments",
   "log_file": "./logs/auto_kaggle.log",
   "log_level": "INFO",
-  "simulation_mode": true,
+  "simulation_mode": false,
   "use_crawler": true,
   "max_discussions": 20,
   "analyze_dataset": true,
-  "prompts_dir": "prompts/KSE",
-  "kse_codex_enabled": false,
+  "prompts_dir": "prompts",
+  "experiment_pyproject_path": "config/experiment_pyproject.toml",
+  "kse_codex_enabled": true,
   "kse_codex_timeout": 600,
-  "pa_codex_enabled": false,
+  "pa_codex_enabled": true,
   "pa_codex_timeout": 300
 }

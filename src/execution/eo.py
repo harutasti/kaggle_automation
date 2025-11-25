@@ -107,6 +107,53 @@ class ExperimentOrchestrator(BaseComponent):
                     except Exception as copy_error:
                         self.logger.warning(f"Failed to copy kaggle_data to worktree: {copy_error}")
 
+                # Copy experiment pyproject.toml for uv environment
+                experiment_pyproject = self.config.get("experiment_pyproject_path", "config/experiment_pyproject.toml")
+                experiment_pyproject_abs = os.path.abspath(experiment_pyproject)
+                worktree_pyproject = os.path.join(worktree_path, "pyproject.toml")
+
+                if os.path.exists(experiment_pyproject_abs) and not os.path.exists(worktree_pyproject):
+                    try:
+                        shutil.copy2(experiment_pyproject_abs, worktree_pyproject)
+                        self.logger.info(f"Copied pyproject.toml to worktree: {worktree_path}")
+                    except Exception as e:
+                        self.logger.warning(f"Failed to copy pyproject.toml: {e}")
+
+                # Copy uv.lock if exists (for reproducibility)
+                uv_lock_src = os.path.join(os.path.dirname(experiment_pyproject_abs), "experiment_uv.lock")
+                # Also check project root
+                if not os.path.exists(uv_lock_src):
+                    uv_lock_src = os.path.abspath("uv.lock")
+                worktree_uv_lock = os.path.join(worktree_path, "uv.lock")
+
+                if os.path.exists(uv_lock_src) and not os.path.exists(worktree_uv_lock):
+                    try:
+                        shutil.copy2(uv_lock_src, worktree_uv_lock)
+                        self.logger.info(f"Copied uv.lock to worktree: {worktree_path}")
+                    except Exception as e:
+                        self.logger.warning(f"Failed to copy uv.lock: {e}")
+
+                # Run uv sync to install dependencies
+                try:
+                    self.logger.info(f"Running 'uv sync' in worktree: {worktree_path}")
+                    result = subprocess.run(
+                        ['uv', 'sync'],
+                        cwd=worktree_path,
+                        capture_output=True,
+                        text=True,
+                        timeout=300  # 5 minutes timeout
+                    )
+                    if result.returncode != 0:
+                        self.logger.warning(f"uv sync failed: {result.stderr}")
+                    else:
+                        self.logger.info(f"uv sync completed in {worktree_path}")
+                except subprocess.TimeoutExpired:
+                    self.logger.warning(f"uv sync timed out in {worktree_path}")
+                except FileNotFoundError:
+                    self.logger.error("uv command not found. Is uv installed?")
+                except Exception as e:
+                    self.logger.warning(f"Failed to run uv sync: {e}")
+
                 # 2. Launch per execution mode
                 if self.execution_mode == "codex":
                     # Codex mode: use codex exec
