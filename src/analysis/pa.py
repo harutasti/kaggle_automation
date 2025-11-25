@@ -16,6 +16,8 @@ class PerformanceAnalyzer(BaseComponent):
         # Use experiment_run_dir if available (timestamped), otherwise fall back to experiments_base_dir
         self.experiment_run_dir = config.get("experiment_run_dir", config.get("experiments_base_dir", "./experiments"))
         self.analysis_dir = os.path.join(self.experiment_run_dir, "analysis")
+        # Worktrees directory for PA Codex execution (gives access to experiment files)
+        self.worktrees_dir = os.path.join(self.experiment_run_dir, "worktrees")
 
         # Only ensure directory if not in dry-run mode
         if not config.get("dry_run", False):
@@ -29,7 +31,8 @@ class PerformanceAnalyzer(BaseComponent):
         self.competition_name = config.get("kaggle_competition_name", "unknown")
         self.evaluation_metric = config.get("evaluation_metric", "unknown")
 
-    def analyze_results(self, iteration: int, results: List[ExperimentResult]) -> AnalysisResult:
+    def analyze_results(self, iteration: int, results: List[ExperimentResult],
+                       official_scores: Optional[Dict[str, float]] = None) -> AnalysisResult:
         """Analyze the current iteration's results (and optionally prior ones)."""
         method_name = "analyze_results"
         self._log_start(method_name, iteration=iteration, num_results=len(results))
@@ -124,7 +127,7 @@ class PerformanceAnalyzer(BaseComponent):
         if self.use_codex and not self.dry_run:
             try:
                 self.logger.info("Performing deep analysis with Codex...")
-                codex_insights = self._analyze_with_codex(iteration, results, analysis)
+                codex_insights = self._analyze_with_codex(iteration, results, analysis, official_scores)
 
                 # Update analysis with Codex insights
                 if codex_insights:
@@ -160,7 +163,8 @@ class PerformanceAnalyzer(BaseComponent):
         return analysis
 
     def _analyze_with_codex(self, iteration: int, results: List[ExperimentResult],
-                          basic_analysis: AnalysisResult) -> Optional[Dict[str, Any]]:
+                          basic_analysis: AnalysisResult,
+                          official_scores: Optional[Dict[str, float]] = None) -> Optional[Dict[str, Any]]:
         """
         Use Codex to perform deep analysis of experiment results.
 
@@ -189,7 +193,7 @@ class PerformanceAnalyzer(BaseComponent):
             codex_result = execute_codex(
                 mode=CodexMode.PA,
                 results_data=prompt,  # PA expects results_data, not prompt
-                output_dir=self.analysis_dir,
+                output_dir=self.worktrees_dir,  # Run in worktrees/ for file access
                 iteration=iteration,
                 codex_responses_dir=codex_responses_dir,
                 dry_run=self.dry_run,
@@ -207,7 +211,7 @@ class PerformanceAnalyzer(BaseComponent):
 
             # Otherwise parse the raw output
             if codex_result.output_file:
-                output_path = os.path.join(self.analysis_dir, codex_result.output_file)
+                output_path = os.path.join(self.worktrees_dir, codex_result.output_file)
                 if os.path.exists(output_path):
                     with open(output_path, 'r') as f:
                         codex_output = f.read()

@@ -1,4 +1,5 @@
 import os
+import shutil
 import time
 import json
 import sys
@@ -41,6 +42,7 @@ class MasterControllerDecisionUnit(BaseComponent):
         self.best_experiment_id_overall: Optional[str] = None
         self.iterations_without_improvement = 0
         self.stop_reason: Optional[str] = None
+        self.pending_cleanup: Dict[str, str] = {}  # {exp_id: worktree_path} for delayed cleanup
 
         # Load stop conditions
         stop_config = self.config.get("stop_condition", {})
@@ -91,6 +93,17 @@ class MasterControllerDecisionUnit(BaseComponent):
              self.user_confirm.show_warning("Failed to download/verify some data files")
              # Could decide to stop here
 
+        # Copy kaggle_data to hypotheses/ for KSE access
+        experiment_run_dir = self.config.get("experiment_run_dir", "./experiments")
+        kaggle_data_src = os.path.join(experiment_run_dir, "kaggle_data")
+        hypotheses_kaggle_data = os.path.join(experiment_run_dir, "hypotheses", "kaggle_data")
+        if os.path.exists(kaggle_data_src) and not os.path.exists(hypotheses_kaggle_data):
+            try:
+                shutil.copytree(kaggle_data_src, hypotheses_kaggle_data)
+                self.logger.info(f"Copied kaggle_data to hypotheses/ for KSE access")
+            except Exception as copy_error:
+                self.logger.warning(f"Failed to copy kaggle_data to hypotheses: {copy_error}")
+
         # 2. Main loop
         while not self._should_stop():
             self.logger.info(f"--- Starting Iteration {self.current_iteration} ---")
@@ -132,7 +145,7 @@ class MasterControllerDecisionUnit(BaseComponent):
             running_experiments = set(launched_ids)
             hypotheses_map = {h.experiment_id: h for h in hypotheses}  # Map ID -> hypothesis
 
-            # 2c. Wait for completion & collect results
+            # 2c. Wait for completion & collect results (DO NOT cleanup yet)
             iteration_results = []
             while running_experiments:
                 time.sleep(10)  # Check every 10 seconds
@@ -155,15 +168,48 @@ class MasterControllerDecisionUnit(BaseComponent):
                          else:
                               self.logger.error(f"Failed to collect result for {exp_id}")
 
-                         # Clean up worktree
-                         self.eo.cleanup_worktree(exp_id, worktree_path)
+                         # Store worktree for later cleanup (after PA analysis)
+                         self.pending_cleanup[exp_id] = worktree_path
 
                      running_experiments -= newly_completed
                      self.logger.info(f"Remaining experiments in iteration: {len(running_experiments)}")
 
             self.all_results[self.current_iteration] = iteration_results
 
-            # 2d. Performance analysis
+            # 2d. Submit successful experiments to Kaggle and get official scores
+            official_scores = {}
+            successful_results = [r for r in iteration_results if r.status == "SUCCESS" and r.score is not None]
+
+            if successful_results:
+                # Confirm submission (respects -y flag via skip_confirmations)
+                if self.user_confirm.confirm_iteration_submissions(
+                    self.current_iteration,
+                    [r.experiment_id for r in successful_results]
+                ):
+                    self.logger.info(f"Submitting {len(successful_results)} successful experiments to Kaggle")
+                    for result in successful_results:
+                        submission_file = self._find_submission_file(result)
+                        if submission_file:
+                            if self.kim.submit_predictions(
+                                submission_file,
+                                f"Iter {self.current_iteration} - {result.experiment_id}"
+                            ):
+                                # Poll for official score
+                                self.logger.info(f"Waiting for official score for {result.experiment_id}...")
+                                score_result = self.kim.get_submission_score(wait_timeout=120)
+                                if score_result and score_result.get("score"):
+                                    official_scores[result.experiment_id] = score_result["score"]
+                                    self.logger.info(f"Official score for {result.experiment_id}: {score_result['score']}")
+                                else:
+                                    self.logger.warning(f"Could not get official score for {result.experiment_id}")
+                            else:
+                                self.logger.error(f"Failed to submit {result.experiment_id}")
+                        else:
+                            self.logger.warning(f"No submission file found for {result.experiment_id}")
+                else:
+                    self.logger.info("User skipped Kaggle submissions for this iteration")
+
+            # 2e. Performance analysis (with official scores)
             if iteration_results:
                 # Confirm PA analysis
                 if not self.user_confirm.confirm_pa_analysis(self.current_iteration, len(iteration_results)):
@@ -171,13 +217,24 @@ class MasterControllerDecisionUnit(BaseComponent):
                     self.user_confirm.show_warning("Skipping performance analysis for this iteration")
                     analysis_result = None
                 else:
-                    analysis_result = self.pa.analyze_results(self.current_iteration, iteration_results)
+                    analysis_result = self.pa.analyze_results(
+                        self.current_iteration,
+                        iteration_results,
+                        official_scores=official_scores
+                    )
                     self.user_confirm.show_success("Performance analysis completed")
             else:
                 self.logger.warning("No results to analyze for this iteration")
                 analysis_result = None
 
-            # 2e. Update overall best and check improvement
+            # 2f. Cleanup worktrees (after PA has finished analyzing)
+            if self.pending_cleanup:
+                self.logger.info(f"Cleaning up {len(self.pending_cleanup)} worktrees")
+                for exp_id, worktree_path in self.pending_cleanup.items():
+                    self.eo.cleanup_worktree(exp_id, worktree_path)
+                self.pending_cleanup.clear()
+
+            # 2g. Update overall best and check improvement
             if analysis_result:
                 self._update_overall_best(analysis_result)
 
@@ -252,6 +309,25 @@ class MasterControllerDecisionUnit(BaseComponent):
                  self.iterations_without_improvement += 1
                  self.logger.info(f"No valid score in this iteration. Iterations without improvement: {self.iterations_without_improvement}")
 
+    def _find_submission_file(self, result: ExperimentResult) -> Optional[str]:
+        """Find the submission file path for an experiment result."""
+        if result.result_files:
+            for file_path in result.result_files:
+                if 'submission' in file_path.lower():
+                    # Convert relative path to absolute
+                    absolute_path = os.path.join(self.rad.results_base_dir, file_path)
+                    if os.path.exists(absolute_path):
+                        return absolute_path
+
+        # Also check worktree if pending cleanup still has the path
+        if result.experiment_id in self.pending_cleanup:
+            worktree_path = self.pending_cleanup[result.experiment_id]
+            submission_name = f"submission_{result.experiment_id}.csv"
+            worktree_submission = os.path.join(worktree_path, submission_name)
+            if os.path.exists(worktree_submission):
+                return worktree_submission
+
+        return None
 
     def _final_reporting(self):
         """Log the final results report."""

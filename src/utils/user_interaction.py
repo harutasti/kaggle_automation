@@ -151,6 +151,24 @@ class UserConfirmation:
             "Codex API usage will be required (may incur costs)."
         )
 
+    def confirm_iteration_submissions(self, iteration: int, experiment_ids: list) -> bool:
+        """
+        Confirm submitting iteration's successful experiments to Kaggle.
+
+        Args:
+            iteration: Current iteration number
+            experiment_ids: List of successful experiment IDs to submit
+
+        Returns:
+            True if user confirms (or skip_confirmations is True)
+        """
+        return self.confirm_action(
+            "Submit Iteration Results to Kaggle",
+            f"Submit {len(experiment_ids)} successful experiment(s) from iteration {iteration} to Kaggle",
+            f"Experiments: {', '.join(experiment_ids[:5])}{'...' if len(experiment_ids) > 5 else ''}",
+            "This will submit predictions to the Kaggle leaderboard for official scoring."
+        )
+
     def show_status(self, message: str, style: str = "dim"):
         """Display a status message without requiring confirmation."""
         self.console.print(f"[{style}]{message}[/{style}]")

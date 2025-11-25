@@ -1,4 +1,5 @@
 import os
+import shutil
 import time
 import uuid
 import subprocess
@@ -95,6 +96,16 @@ class ExperimentOrchestrator(BaseComponent):
                      start_point = self.repo.head.commit
                      self.repo.git.worktree('add', '-b', branch_name, worktree_path, start_point)
                      self.logger.info(f"Created Git worktree at: {worktree_path} on branch {branch_name}")
+
+                # Copy kaggle_data to worktree for WAA access
+                kaggle_data_src = os.path.join(self.experiment_run_dir, "kaggle_data")
+                worktree_kaggle_data = os.path.join(worktree_path, "kaggle_data")
+                if os.path.exists(kaggle_data_src) and not os.path.exists(worktree_kaggle_data):
+                    try:
+                        shutil.copytree(kaggle_data_src, worktree_kaggle_data)
+                        self.logger.info(f"Copied kaggle_data to worktree: {worktree_path}")
+                    except Exception as copy_error:
+                        self.logger.warning(f"Failed to copy kaggle_data to worktree: {copy_error}")
 
                 # 2. Launch per execution mode
                 if self.execution_mode == "codex":

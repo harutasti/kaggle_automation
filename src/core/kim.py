@@ -315,7 +315,73 @@ class KaggleInterfaceManager(BaseComponent):
             self.logger.info(f"Submission successful. Result: {result}")
             self._log_end(method_name, result=True)
             return True
-            
+
         except Exception as e:
             self._log_error(method_name, e)
             return False
+
+    def get_submission_score(self, wait_timeout: int = 300) -> Optional[Dict[str, Any]]:
+        """
+        Get the most recent submission score from Kaggle.
+
+        Polls Kaggle API until the latest submission has a public score,
+        or until the timeout is reached.
+
+        Args:
+            wait_timeout: Maximum seconds to wait for score (default: 5 minutes)
+
+        Returns:
+            Dict with submission details including score, or None if unavailable
+        """
+        method_name = "get_submission_score"
+        self._log_start(method_name, wait_timeout=wait_timeout)
+
+        if self.simulation_mode or not self.api:
+            # Return simulated score for testing
+            self.logger.info("Returning simulated submission score")
+            result = {"score": 0.85, "status": "complete", "submission_id": "simulated"}
+            self._log_end(method_name, result=result)
+            return result
+
+        try:
+            import time
+            start = time.time()
+
+            while time.time() - start < wait_timeout:
+                try:
+                    submissions = self.api.competition_submissions(self.competition_name)
+
+                    if submissions:
+                        latest = submissions[0]
+
+                        # Check if score is available
+                        if hasattr(latest, 'publicScore') and latest.publicScore:
+                            result = {
+                                "score": float(latest.publicScore),
+                                "status": "complete",
+                                "submission_id": getattr(latest, 'ref', None),
+                                "description": getattr(latest, 'description', None),
+                                "date": str(getattr(latest, 'date', None))
+                            }
+                            self.logger.info(f"Got submission score: {result['score']}")
+                            self._log_end(method_name, result=result)
+                            return result
+
+                        # Score not yet available
+                        status = getattr(latest, 'status', 'unknown')
+                        self.logger.debug(f"Submission status: {status}, waiting for score...")
+
+                except Exception as poll_error:
+                    self.logger.warning(f"Error polling submissions: {poll_error}")
+
+                # Wait before retry
+                time.sleep(10)
+
+            # Timeout reached
+            self.logger.warning(f"Timed out waiting for submission score after {wait_timeout}s")
+            self._log_end(method_name, result=None)
+            return None
+
+        except Exception as e:
+            self._log_error(method_name, e)
+            return None
