@@ -11,6 +11,7 @@ from .base_component import BaseComponent
 from ..data_models import CompetitionInfo
 from ..utils.file_utils import ensure_dir
 from ..utils.crawler_parser import parse_competition_info
+from ..utils.dataset_analyzer import DatasetAnalyzer
 
 class KaggleInterfaceManager(BaseComponent):
     def __init__(self, config: dict):
@@ -23,6 +24,8 @@ class KaggleInterfaceManager(BaseComponent):
         self.use_crawler = config.get("use_crawler", True)  # Default to using crawler
         self.crawler_output_dir = "kaggle_competitions"
         self.max_discussions = config.get("max_discussions", 20)
+        self.dataset_analysis = None  # Will store dataset analysis results
+        self.analyze_dataset = config.get("analyze_dataset", True)  # Enable dataset analysis by default
 
     def _authenticate_kaggle(self):
         """Authenticate with the Kaggle API."""
@@ -168,8 +171,13 @@ class KaggleInterfaceManager(BaseComponent):
                             self.logger.info(f"Copied data file: {filename}")
                     
                     # Update competition_info with actual files
-                    competition_info.data_files = [f for f in os.listdir(self.download_dir) 
+                    competition_info.data_files = [f for f in os.listdir(self.download_dir)
                                                  if os.path.isfile(os.path.join(self.download_dir, f))]
+
+                    # Analyze dataset if enabled
+                    if self.analyze_dataset:
+                        self._analyze_competition_dataset()
+
                     self._log_end(method_name, result=True)
                     return True
             
@@ -208,12 +216,68 @@ class KaggleInterfaceManager(BaseComponent):
                 
                 # Update data file list
                 competition_info.data_files = [f for f in downloaded_files if os.path.isfile(os.path.join(self.download_dir, f))]
-            
+
+            # Analyze dataset if enabled
+            if self.analyze_dataset:
+                self._analyze_competition_dataset()
+
             self._log_end(method_name, result=True)
             return True
         except Exception as e:
             self._log_error(method_name, e)
             return False
+
+    def _analyze_competition_dataset(self) -> Optional[Dict[str, Any]]:
+        """Analyze the downloaded competition dataset."""
+        try:
+            self.logger.info("Analyzing competition dataset...")
+
+            # Determine data directory
+            data_dir = self.download_dir
+            if not os.path.exists(data_dir):
+                # Try crawler data directory
+                crawler_data_dir = os.path.join(self.crawler_output_dir, self.competition_name, "data")
+                if os.path.exists(crawler_data_dir):
+                    data_dir = crawler_data_dir
+                else:
+                    self.logger.warning("No data directory found for analysis")
+                    return None
+
+            # Initialize dataset analyzer
+            analyzer = DatasetAnalyzer(self.competition_name, data_dir)
+
+            # Analyze the dataset
+            self.dataset_analysis = analyzer.analyze_competition_data()
+
+            # Log key statistics
+            if self.dataset_analysis:
+                stats = self.dataset_analysis.get("dataset_stats", {})
+                self.logger.info(f"Dataset Analysis Complete:")
+                self.logger.info(f"  - Training samples: {stats.get('train_size', 'N/A')}")
+                self.logger.info(f"  - Test samples: {stats.get('test_size', 'N/A')}")
+                self.logger.info(f"  - Features: {stats.get('feature_count', 'N/A')}")
+
+                target = self.dataset_analysis.get("target_analysis", {})
+                if target:
+                    self.logger.info(f"  - Target variable: {target.get('target_variable', 'N/A')}")
+                    self.logger.info(f"  - Problem type: {target.get('problem_type', 'N/A')}")
+
+                missing = self.dataset_analysis.get("missing_data", {})
+                if missing:
+                    self.logger.info(f"  - Missing data pattern: {missing.get('missing_pattern', 'N/A')}")
+
+            return self.dataset_analysis
+
+        except Exception as e:
+            self.logger.error(f"Failed to analyze dataset: {e}")
+            return None
+
+    def get_dataset_analysis(self) -> Optional[Dict[str, Any]]:
+        """Get the cached dataset analysis results."""
+        if self.dataset_analysis is None and self.analyze_dataset:
+            # Try to analyze now if not done yet
+            self._analyze_competition_dataset()
+        return self.dataset_analysis
 
     def submit_predictions(self, file_path: str, message: str) -> bool:
         """Submit predictions to Kaggle."""

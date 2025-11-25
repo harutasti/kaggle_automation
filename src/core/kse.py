@@ -8,6 +8,9 @@ from .base_component import BaseComponent
 from ..data_models import CompetitionInfo, ExperimentHypothesis, ExperimentResult, AnalysisResult
 from ..utils.file_utils import write_markdown, ensure_dir
 from ..utils.crawler_parser import parse_discussion_strategies
+from ..utils.dataset_analyzer import DatasetAnalyzer
+from ..utils.system_specs import SystemSpecsDetector
+from ..utils.prompt_filler import PromptFiller
 
 class KnowledgeStrategyEngine(BaseComponent):
     def __init__(self, config: dict):
@@ -18,7 +21,87 @@ class KnowledgeStrategyEngine(BaseComponent):
         self.competition_name = config.get("kaggle_competition_name")
         self.use_crawler = config.get("use_crawler", True)
         self.discussion_strategies: List[Dict[str, Any]] = []
+
+        # Initialize new components
+        self.system_specs_detector = SystemSpecsDetector()
+        self.system_specs = None  # Will be populated on first use
+        self.prompt_filler = PromptFiller(prompts_dir=config.get("prompts_dir", "prompts/KSE"))
+        self.dataset_analyzer = None  # Will be initialized when needed
+        self.dataset_analysis = None  # Cache for dataset analysis
+
+        # Codex execution mode for KSE (if enabled)
+        self.use_codex_for_generation = config.get("kse_codex_enabled", False)
+        self.codex_timeout = config.get("kse_codex_timeout", 600)
         
+    def _get_system_specs(self) -> Dict[str, Any]:
+        """Get system specifications, caching the result."""
+        if self.system_specs is None:
+            self.logger.info("Detecting system specifications...")
+            self.system_specs = self.system_specs_detector.get_specs()
+            self.logger.info(f"System: {self.system_specs['cpu']['compute_type']} CPU, "
+                           f"{self.system_specs['memory']['memory_class']}, "
+                           f"GPU: {self.system_specs['gpu']['available']}")
+        return self.system_specs_detector.get_prompt_placeholders()
+
+    def _get_dataset_analysis(self, competition_info: CompetitionInfo) -> Dict[str, Any]:
+        """Get dataset analysis, caching the result."""
+        if self.dataset_analysis is None:
+            self.logger.info("Analyzing competition dataset...")
+            # Initialize dataset analyzer with competition data directory
+            data_dir = os.path.join("kaggle_competitions", self.competition_name, "data")
+            if os.path.exists(data_dir):
+                self.dataset_analyzer = DatasetAnalyzer(self.competition_name, data_dir)
+                self.dataset_analysis = self.dataset_analyzer.get_prompt_placeholders()
+                self.logger.info(f"Dataset: {self.dataset_analysis.get('train_size', 0)} train samples, "
+                               f"{self.dataset_analysis.get('feature_count', 0)} features")
+            else:
+                self.logger.warning(f"Data directory not found: {data_dir}")
+                self.dataset_analysis = self._get_default_dataset_placeholders()
+        return self.dataset_analysis
+
+    def _get_default_dataset_placeholders(self) -> Dict[str, Any]:
+        """Return default dataset placeholders when analysis isn't possible."""
+        return {
+            "train_size": "[ASSUMED: 1000]",
+            "test_size": "[ASSUMED: 500]",
+            "feature_count": "[ASSUMED: 20]",
+            "numeric_count": "[ASSUMED: 10]",
+            "categorical_count": "[ASSUMED: 10]",
+            "target_variable": "[ASSUMED: target]",
+            "competition_type": "[ASSUMED: classification]",
+            "target_distribution": "[ASSUMED: balanced]",
+            "class_distribution": "[ASSUMED: balanced]",
+            "missing_data_summary": "[ASSUMED: no missing data]",
+            "unique_characteristics": "[ASSUMED: standard tabular dataset]",
+            "temporal_or_cross_sectional": "[ASSUMED: cross-sectional]"
+        }
+
+    def _get_community_insights(self) -> Dict[str, Any]:
+        """Get community insights from discussions."""
+        insights = {
+            "winning_approaches": [],
+            "benchmarks": {},
+            "common_pitfalls": [],
+            "recommended_techniques": [],
+            "domain_knowledge": "[ASSUMED: No specific domain knowledge]",
+            "ceiling_score": 0.95
+        }
+
+        if self.discussion_strategies:
+            # Extract insights from discussion strategies
+            for strategy in self.discussion_strategies:
+                if strategy.get('description'):
+                    insights["winning_approaches"].append(strategy['description'][:200])
+                if strategy.get('algorithm'):
+                    insights["recommended_techniques"].append(strategy['algorithm'])
+
+            # Add benchmark scores if available
+            for strategy in self.discussion_strategies:
+                if strategy.get('score'):
+                    insights["benchmarks"][strategy['strategy_name']] = strategy['score']
+
+        return insights
+
     def _load_discussion_strategies(self):
         """Load strategies from crawler discussion data"""
         if self.use_crawler and self.competition_name:
@@ -45,32 +128,195 @@ class KnowledgeStrategyEngine(BaseComponent):
         """Generate initial experiment hypotheses."""
         method_name = "generate_initial_hypotheses"
         self._log_start(method_name, num_hypotheses=num_hypotheses)
-        
+
         # Load strategies from discussion insights
         self._load_discussion_strategies()
-        
+
+        if self.use_codex_for_generation:
+            # Use Codex with external prompts for hypothesis generation
+            hypotheses = self._generate_hypotheses_with_codex(
+                competition_info, num_hypotheses, iteration=0, is_initial=True
+            )
+        else:
+            # Fallback to original programmatic generation
+            hypotheses = []
+            for i in range(num_hypotheses):
+                exp_id = f"iter0_exp{i+1}_{uuid.uuid4().hex[:6]}"
+                strategy = random.choice(self.strategies)
+                params = self._get_dummy_params(strategy)
+                task_md_path = os.path.join(self.hypothesis_dir, f"{exp_id}_task.md")
+
+                task_markdown = self._generate_task_markdown(exp_id, 0, strategy, params, competition_info)
+                write_markdown(task_markdown, task_md_path)
+
+                hypothesis = ExperimentHypothesis(
+                    experiment_id=exp_id,
+                    iteration=0,
+                    strategy_name=strategy,
+                    parameters=params,
+                    task_markdown_path=task_md_path
+                )
+                hypotheses.append(hypothesis)
+                self.logger.debug(f"Generated hypothesis: {exp_id} ({strategy})")
+
+        self._log_end(method_name, result=f"Generated {len(hypotheses)} hypotheses")
+        return hypotheses
+
+    def _generate_hypotheses_with_codex(self,
+                                       competition_info: CompetitionInfo,
+                                       num_hypotheses: int,
+                                       iteration: int,
+                                       is_initial: bool = True,
+                                       analysis_result: Optional[AnalysisResult] = None,
+                                       previous_results: Optional[List[ExperimentResult]] = None) -> List[ExperimentHypothesis]:
+        """Generate hypotheses using Codex with external prompt templates."""
+        self.logger.info(f"Generating hypotheses using Codex for iteration {iteration}")
+
+        # Gather all data for placeholder filling
+        competition_data = {
+            "name": competition_info.name,
+            "evaluation_metric": competition_info.evaluation_metric,
+            "submission_format": "csv with id and prediction columns",  # Default format
+            "deadline": str(competition_info.deadline) if competition_info.deadline else "[ASSUMED: No deadline]"
+        }
+
+        # Get system specs
+        system_specs = self._get_system_specs()
+
+        # Get dataset analysis
+        dataset_analysis = self._get_dataset_analysis(competition_info)
+
+        # Get community insights
+        community_insights = self._get_community_insights()
+
+        if is_initial:
+            # Fill initial iteration prompt
+            filled_prompt = self.prompt_filler.fill_initial_prompt(
+                competition_info=competition_data,
+                dataset_analysis=dataset_analysis,
+                system_specs=system_specs,
+                community_insights=community_insights,
+                num_hypotheses=num_hypotheses
+            )
+        else:
+            # Prepare iteration results for subsequent prompts
+            iteration_results = self._prepare_iteration_results(previous_results)
+            pa_analysis = self._prepare_pa_analysis(analysis_result)
+
+            # Fill subsequent iteration prompt
+            filled_prompt = self.prompt_filler.fill_subsequent_prompt(
+                competition_info=competition_data,
+                dataset_analysis=dataset_analysis,
+                system_specs=system_specs,
+                community_insights=community_insights,
+                iteration_results=iteration_results,
+                pa_analysis=pa_analysis,
+                iteration_number=iteration,
+                num_hypotheses=num_hypotheses
+            )
+
+        # Save filled prompt for debugging
+        prompt_path = os.path.join(self.hypothesis_dir, f"kse_prompt_iter{iteration}.md")
+        self.prompt_filler.save_filled_prompt(filled_prompt, prompt_path)
+        self.logger.info(f"Saved filled prompt to {prompt_path}")
+
+        # TODO: Execute Codex to generate hypotheses from the filled prompt
+        # For now, return empty list or fallback to programmatic generation
+        self.logger.warning("Codex execution for KSE not yet implemented, falling back to programmatic generation")
+
+        # Fallback to programmatic generation
         hypotheses = []
         for i in range(num_hypotheses):
-            exp_id = f"iter0_exp{i+1}_{uuid.uuid4().hex[:6]}"
+            exp_id = f"iter{iteration}_exp{i+1}_{uuid.uuid4().hex[:6]}"
             strategy = random.choice(self.strategies)
-            params = self._get_dummy_params(strategy)
+            params = self._get_dummy_params(strategy, previous_results)
             task_md_path = os.path.join(self.hypothesis_dir, f"{exp_id}_task.md")
 
-            task_markdown = self._generate_task_markdown(exp_id, 0, strategy, params, competition_info)
+            task_markdown = self._generate_task_markdown(exp_id, iteration, strategy, params, competition_info)
             write_markdown(task_markdown, task_md_path)
 
             hypothesis = ExperimentHypothesis(
                 experiment_id=exp_id,
-                iteration=0,
+                iteration=iteration,
                 strategy_name=strategy,
                 parameters=params,
                 task_markdown_path=task_md_path
             )
             hypotheses.append(hypothesis)
-            self.logger.debug(f"Generated hypothesis: {exp_id} ({strategy})")
 
-        self._log_end(method_name, result=f"Generated {len(hypotheses)} hypotheses")
         return hypotheses
+
+    def _prepare_iteration_results(self, previous_results: Optional[List[ExperimentResult]]) -> Dict[str, Any]:
+        """Prepare iteration results for prompt filling."""
+        if not previous_results:
+            return {"experiments": [], "best_experiment": {}, "worst_experiment": {}}
+
+        # Find best and worst experiments
+        valid_results = [r for r in previous_results if r.validation_score is not None]
+        if valid_results:
+            best_result = max(valid_results, key=lambda r: r.validation_score)
+            worst_result = min(valid_results, key=lambda r: r.validation_score)
+            scores = [r.validation_score for r in valid_results]
+
+            return {
+                "experiments": [
+                    {
+                        "id": r.experiment_id,
+                        "strategy": r.strategy_name,
+                        "validation_score": r.validation_score,
+                        "runtime_minutes": r.runtime_seconds / 60 if r.runtime_seconds else 0,
+                        "status": r.status,
+                        "train_val_gap": 0  # Would need to calculate from logs
+                    }
+                    for r in previous_results
+                ],
+                "best_experiment": {
+                    "id": best_result.experiment_id,
+                    "strategy": best_result.strategy_name,
+                    "score": best_result.validation_score,
+                    "runtime_minutes": best_result.runtime_seconds / 60 if best_result.runtime_seconds else 0
+                },
+                "worst_experiment": {
+                    "id": worst_result.experiment_id,
+                    "strategy": worst_result.strategy_name,
+                    "score": worst_result.validation_score
+                },
+                "mean_score": sum(scores) / len(scores),
+                "std_score": 0,  # Would need numpy for std
+                "min_score": min(scores),
+                "max_score": max(scores),
+                "success_rate": len(valid_results) / len(previous_results) * 100 if previous_results else 0,
+                "cv_scheme": "StratifiedKFold(5)"
+            }
+
+        return {"experiments": [], "best_experiment": {}, "worst_experiment": {}}
+
+    def _prepare_pa_analysis(self, analysis_result: Optional[AnalysisResult]) -> Dict[str, Any]:
+        """Prepare PA analysis for prompt filling."""
+        if not analysis_result:
+            return {
+                "success_patterns": [],
+                "failure_patterns": [],
+                "feature_importance": [],
+                "high_priority": [],
+                "medium_priority": [],
+                "experimental": [],
+                "avoid": [],
+                "unresolved_questions": [],
+                "summary": "No analysis available yet."
+            }
+
+        return {
+            "success_patterns": getattr(analysis_result, 'success_patterns', []),
+            "failure_patterns": getattr(analysis_result, 'failure_patterns', []),
+            "feature_importance": getattr(analysis_result, 'feature_importance', []),
+            "high_priority": analysis_result.recommended_strategies if analysis_result.recommended_strategies else [],
+            "medium_priority": [],
+            "experimental": [],
+            "avoid": getattr(analysis_result, 'strategies_to_avoid', []),
+            "unresolved_questions": getattr(analysis_result, 'unresolved_questions', []),
+            "summary": analysis_result.summary if analysis_result.summary else "Analysis complete."
+        }
 
     def generate_next_hypotheses(self,
                                  competition_info: CompetitionInfo,
@@ -81,38 +327,47 @@ class KnowledgeStrategyEngine(BaseComponent):
         """Generate the next set of hypotheses based on analysis and past results."""
         method_name = "generate_next_hypotheses"
         self._log_start(method_name, iteration=current_iteration, num_hypotheses=num_hypotheses)
-        hypotheses = []
 
-        # Choose strategies based on analysis/history (simulation uses random + tweaks)
-        possible_strategies = self.strategies[:]  # Make a copy
-        if analysis_result and analysis_result.recommended_strategies:
-            # Prioritize recommended strategies
-            possible_strategies = analysis_result.recommended_strategies + [s for s in self.strategies if s not in analysis_result.recommended_strategies]
-            self.logger.info(f"Prioritizing recommended strategies: {analysis_result.recommended_strategies}")
-
-        if previous_results:
-             # Could generate hypotheses that fine-tune successful strategies (omitted)
-             pass
-
-        for i in range(num_hypotheses):
-            exp_id = f"iter{current_iteration}_exp{i+1}_{uuid.uuid4().hex[:6]}"
-            # Select strategy (prioritize recommendations; otherwise rotate)
-            strategy = possible_strategies[i % len(possible_strategies)]
-            params = self._get_dummy_params(strategy, previous_results)  # Could adjust params using past results
-            task_md_path = os.path.join(self.hypothesis_dir, f"{exp_id}_task.md")
-
-            task_markdown = self._generate_task_markdown(exp_id, current_iteration, strategy, params, competition_info)
-            write_markdown(task_markdown, task_md_path)
-
-            hypothesis = ExperimentHypothesis(
-                experiment_id=exp_id,
-                iteration=current_iteration,
-                strategy_name=strategy,
-                parameters=params,
-                task_markdown_path=task_md_path
+        if self.use_codex_for_generation:
+            # Use Codex with external prompts for hypothesis generation
+            hypotheses = self._generate_hypotheses_with_codex(
+                competition_info, num_hypotheses, iteration=current_iteration,
+                is_initial=False, analysis_result=analysis_result, previous_results=previous_results
             )
-            hypotheses.append(hypothesis)
-            self.logger.debug(f"Generated hypothesis: {exp_id} ({strategy})")
+        else:
+            # Fallback to original programmatic generation
+            hypotheses = []
+
+            # Choose strategies based on analysis/history (simulation uses random + tweaks)
+            possible_strategies = self.strategies[:]  # Make a copy
+            if analysis_result and analysis_result.recommended_strategies:
+                # Prioritize recommended strategies
+                possible_strategies = analysis_result.recommended_strategies + [s for s in self.strategies if s not in analysis_result.recommended_strategies]
+                self.logger.info(f"Prioritizing recommended strategies: {analysis_result.recommended_strategies}")
+
+            if previous_results:
+                 # Could generate hypotheses that fine-tune successful strategies (omitted)
+                 pass
+
+            for i in range(num_hypotheses):
+                exp_id = f"iter{current_iteration}_exp{i+1}_{uuid.uuid4().hex[:6]}"
+                # Select strategy (prioritize recommendations; otherwise rotate)
+                strategy = possible_strategies[i % len(possible_strategies)]
+                params = self._get_dummy_params(strategy, previous_results)  # Could adjust params using past results
+                task_md_path = os.path.join(self.hypothesis_dir, f"{exp_id}_task.md")
+
+                task_markdown = self._generate_task_markdown(exp_id, current_iteration, strategy, params, competition_info)
+                write_markdown(task_markdown, task_md_path)
+
+                hypothesis = ExperimentHypothesis(
+                    experiment_id=exp_id,
+                    iteration=current_iteration,
+                    strategy_name=strategy,
+                    parameters=params,
+                    task_markdown_path=task_md_path
+                )
+                hypotheses.append(hypothesis)
+                self.logger.debug(f"Generated hypothesis: {exp_id} ({strategy})")
 
         self._log_end(method_name, result=f"Generated {len(hypotheses)} hypotheses")
         return hypotheses

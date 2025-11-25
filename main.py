@@ -9,6 +9,7 @@ sys.path.insert(0, project_root)
 from src.core.mcdu import MasterControllerDecisionUnit
 from src.utils.logger import setup_logger
 from src.utils.file_utils import ensure_dir
+from src.utils.system_specs import SystemSpecsDetector
 
 DEFAULT_CONFIG_FILE = "config/config.json"
 
@@ -38,6 +39,18 @@ def main():
 
     logger.info("Logger initialized.")
     logger.info(f"Using configuration: {config}")
+
+    # Detect system specifications
+    logger.info("Detecting system specifications...")
+    system_detector = SystemSpecsDetector()
+    system_specs = system_detector.get_specs()
+    logger.info(f"System: {system_specs['platform']['os_type']} on {system_specs['platform']['machine']}")
+    logger.info(f"CPU: {system_specs['cpu']['count']} cores, {system_specs['cpu']['compute_type']}")
+    logger.info(f"Memory: {system_specs['memory'].get('total_gb', 'Unknown'):.1f} GB" if system_specs['memory'].get('total_gb') else "Memory: Unknown")
+    logger.info(f"GPU: {'Available' if system_specs['gpu']['available'] else 'Not available'}")
+
+    # Add system specs to config for components to access
+    config['system_specs'] = system_specs
 
     exp_base_dir = config.get("experiments_base_dir", "./experiments")
     ensure_dir(exp_base_dir)

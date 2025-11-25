@@ -11,5 +11,11 @@
   "log_level": "INFO",
   "simulation_mode": true,
   "use_crawler": true,
-  "max_discussions": 20
+  "max_discussions": 20,
+  "analyze_dataset": true,
+  "prompts_dir": "prompts/KSE",
+  "kse_codex_enabled": false,
+  "kse_codex_timeout": 600,
+  "pa_codex_enabled": false,
+  "pa_codex_timeout": 300
 }

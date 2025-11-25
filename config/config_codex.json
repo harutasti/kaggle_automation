@@ -24,6 +24,20 @@
     "notes": "Codex CLI must be installed and in PATH"
   },
 
+  "_comment_kse_codex": "Enable Codex for KSE hypothesis generation",
+  "kse_codex_enabled": true,
+  "kse_codex_timeout": 600,
+
+  "_comment_pa_codex": "Enable Codex for PA deep analysis",
+  "pa_codex_enabled": true,
+  "pa_codex_timeout": 300,
+
+  "_comment_data_analysis": "Enable automatic dataset analysis",
+  "analyze_dataset": true,
+
+  "_comment_prompts": "Directory containing KSE prompt templates",
+  "prompts_dir": "prompts/KSE",
+
   "_comment_crawler": "Use real Kaggle competition data",
   "use_crawler": true,
   "max_discussions": 20,
