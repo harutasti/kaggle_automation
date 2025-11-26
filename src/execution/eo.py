@@ -13,6 +13,7 @@ from ..utils.file_utils import ensure_dir, remove_dir
 from .codex_launcher import CodexExperimentLauncher
 from .session_manager import SessionManager, SessionStatus
 from ..utils.resource_monitor import ResourceMonitor
+from ..utils.gpu_allocator import GPUAllocator
 
 class ExperimentOrchestrator(BaseComponent):
     def __init__(self, config: dict):
@@ -44,6 +45,10 @@ class ExperimentOrchestrator(BaseComponent):
 
         # Track resource monitors for RUNNING experiments
         self._resource_monitors: Dict[str, ResourceMonitor] = {}
+
+        # Initialize GPU allocator for parallel WAA resource management
+        self.gpu_allocator = GPUAllocator(config)
+        self.logger.info(f"GPU allocator initialized")
 
     def _get_git_repo(self):
         """Return the Git repository for the current directory."""
@@ -89,6 +94,12 @@ class ExperimentOrchestrator(BaseComponent):
         # Respect available CPU cores to avoid over-parallelism
         max_workers = min(len(hypotheses), multiprocessing.cpu_count() * 2)  # e.g., up to 2x core count
         self.logger.info(f"Launching {len(hypotheses)} experiments with max {max_workers} parallel workers.")
+
+        # Calculate total WAAs for GPU allocation
+        total_waas = len(hypotheses)
+
+        # Log GPU allocation summary
+        self.logger.info(self.gpu_allocator.get_allocation_summary(total_waas))
 
         processes_to_start = []
         for hypothesis in hypotheses:
@@ -169,12 +180,25 @@ class ExperimentOrchestrator(BaseComponent):
                 except Exception as e:
                     self.logger.warning(f"Failed to create status file: {e}")
 
+                # Calculate GPU allocation for this WAA
+                waa_index = GPUAllocator.parse_waa_index(exp_id)
+                gpu_allocation = self.gpu_allocator.allocate(waa_index, total_waas)
+
+                # Prepare environment with GPU settings
+                env = os.environ.copy()
+                env.update(gpu_allocation.env_vars)
+
+                self.logger.info(f"GPU allocation for {exp_id}: "
+                                f"CUDA_VISIBLE_DEVICES={gpu_allocation.cuda_visible_devices or 'N/A'}, "
+                                f"memory_fraction={gpu_allocation.memory_fraction:.2f}, "
+                                f"gpu_count={gpu_allocation.gpu_count}")
+
                 # 2. Launch per execution mode
                 if self.execution_mode == "codex":
-                    # Codex mode: use codex exec
-                    process = self._launch_codex_experiment(hypothesis, worktree_path, exp_id)
+                    # Codex mode: use codex exec with GPU env vars
+                    process = self._launch_codex_experiment(hypothesis, worktree_path, exp_id, env=env)
                 else:
-                    # Simulation mode: use WAA simulator
+                    # Simulation mode: use WAA simulator with GPU env vars
                     cmd = [
                         'python', self.wca_simulator_script,
                         '--worktree-path', worktree_path,
@@ -182,7 +206,7 @@ class ExperimentOrchestrator(BaseComponent):
                         '--experiment-id', exp_id,
                         '--log-level', self.config.get("log_level", "INFO")
                     ]
-                    process = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+                    process = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, env=env)
 
                 if process:
                     processes_to_start.append((process, exp_id, worktree_path))
@@ -201,8 +225,21 @@ class ExperimentOrchestrator(BaseComponent):
         self._log_end(method_name, result=f"Launched {len(launched_ids)} processes.")
         return launched_ids
 
-    def _launch_codex_experiment(self, hypothesis: ExperimentHypothesis, worktree_path: str, exp_id: str) -> Optional[subprocess.Popen]:
-        """Launch a single experiment using Codex."""
+    def _launch_codex_experiment(
+        self,
+        hypothesis: ExperimentHypothesis,
+        worktree_path: str,
+        exp_id: str,
+        env: Optional[Dict[str, str]] = None
+    ) -> Optional[subprocess.Popen]:
+        """Launch a single experiment using Codex.
+
+        Args:
+            hypothesis: Experiment hypothesis with task markdown path
+            worktree_path: Working directory for the experiment
+            exp_id: Experiment identifier
+            env: Environment variables to set (including GPU allocation)
+        """
         try:
             # Read task markdown
             with open(hypothesis.task_markdown_path, 'r', encoding='utf-8') as f:
@@ -230,7 +267,8 @@ Please execute the experiment exactly as described above. Ensure you:
                 stdout=subprocess.PIPE,
                 stderr=subprocess.STDOUT,
                 cwd=worktree_path,
-                text=True
+                text=True,
+                env=env or os.environ
             )
 
             # Send stdin asynchronously (avoid blocking)

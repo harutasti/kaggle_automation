@@ -12,6 +12,7 @@ from ..utils.dataset_analyzer import DatasetAnalyzer
 from ..utils.system_specs import SystemSpecsDetector
 from ..utils.prompt_filler import PromptFiller
 from ..utils.codex_executor import CodexMode, execute_codex
+from ..utils.gpu_allocator import GPUAllocator
 
 class KnowledgeStrategyEngine(BaseComponent):
     def __init__(self, config: dict):
@@ -39,6 +40,15 @@ class KnowledgeStrategyEngine(BaseComponent):
         # Codex execution mode for KSE (if enabled)
         self.use_codex_for_generation = config.get("kse_codex_enabled", False)
         self.codex_timeout = config.get("kse_codex_timeout", 600)
+
+        # Prompts directory for loading template files
+        self.prompts_dir = config.get("prompts_dir", "prompts")
+
+        # GPU allocator for parallel WAA resource management
+        self.gpu_allocator = GPUAllocator(config)
+
+        # Number of WAAs per iteration (for GPU allocation calculations)
+        self.wca_per_iteration = config.get("wca_per_iteration", 3)
         
     def _get_system_specs(self) -> Dict[str, Any]:
         """Get system specifications, caching the result."""
@@ -505,10 +515,11 @@ class KnowledgeStrategyEngine(BaseComponent):
         task_md += f"- Results are saved to JSON\n"
         task_md += f"- Completion marker created: `DONE_{exp_id}`\n"
 
-        # Inject uv requirements and status instructions at the beginning
+        # Inject uv requirements, GPU allocation, and status instructions at the beginning
         uv_requirements = self._get_uv_requirements_section()
+        gpu_instructions = self._get_gpu_instructions_section(exp_id)
         status_instructions = self._get_status_instructions_section()
-        return uv_requirements + "\n\n" + status_instructions + "\n\n" + task_md
+        return uv_requirements + "\n\n" + gpu_instructions + "\n\n" + status_instructions + "\n\n" + task_md
 
     def _generate_task_markdown(self, exp_id: str, iteration: int, strategy: str, params: dict, comp_info: CompetitionInfo) -> str:
         """Generate task markdown for the WAA."""
@@ -559,10 +570,11 @@ Based on discussion analysis, here are relevant insights for this strategy:
 
 **Important:** Ensure all file paths for output are relative to the root of this Git worktree. Use the provided `experiment_id` (`{exp_id}`) in filenames.
 """
-        # Inject uv requirements and status instructions at the beginning
+        # Inject uv requirements, GPU allocation, and status instructions at the beginning
         uv_requirements = self._get_uv_requirements_section()
+        gpu_instructions = self._get_gpu_instructions_section(exp_id)
         status_instructions = self._get_status_instructions_section()
-        return uv_requirements + "\n\n" + status_instructions + "\n\n" + markdown.strip()
+        return uv_requirements + "\n\n" + gpu_instructions + "\n\n" + status_instructions + "\n\n" + markdown.strip()
 
     def _get_uv_requirements_section(self) -> str:
         """Return strict uv usage requirements for WAA prompts."""
@@ -628,3 +640,24 @@ The system will automatically resume when training completes (detects low GPU/CP
 4. **EXIT immediately**
 
 **CRITICAL**: After setting RUNNING or COMPLETE, you MUST exit the session!'''
+
+    def _get_gpu_instructions_section(self, exp_id: str, total_waas: Optional[int] = None) -> str:
+        """
+        Return GPU allocation instructions for WAA prompts.
+
+        Args:
+            exp_id: Experiment ID (e.g., "iter0_exp2_abc123")
+            total_waas: Total number of parallel WAAs. If None, uses wca_per_iteration config.
+
+        Returns:
+            GPU allocation instructions as a string
+        """
+        if total_waas is None:
+            total_waas = self.wca_per_iteration
+
+        # Get GPU allocation for this WAA
+        waa_index = GPUAllocator.parse_waa_index(exp_id)
+        allocation = self.gpu_allocator.allocate(waa_index, total_waas)
+
+        # The allocator generates complete, context-aware instructions
+        return allocation.prompt_instructions
