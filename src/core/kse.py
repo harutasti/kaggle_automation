@@ -505,9 +505,10 @@ class KnowledgeStrategyEngine(BaseComponent):
         task_md += f"- Results are saved to JSON\n"
         task_md += f"- Completion marker created: `DONE_{exp_id}`\n"
 
-        # Inject uv requirements at the beginning
+        # Inject uv requirements and status instructions at the beginning
         uv_requirements = self._get_uv_requirements_section()
-        return uv_requirements + "\n\n" + task_md
+        status_instructions = self._get_status_instructions_section()
+        return uv_requirements + "\n\n" + status_instructions + "\n\n" + task_md
 
     def _generate_task_markdown(self, exp_id: str, iteration: int, strategy: str, params: dict, comp_info: CompetitionInfo) -> str:
         """Generate task markdown for the WAA."""
@@ -558,9 +559,10 @@ Based on discussion analysis, here are relevant insights for this strategy:
 
 **Important:** Ensure all file paths for output are relative to the root of this Git worktree. Use the provided `experiment_id` (`{exp_id}`) in filenames.
 """
-        # Inject uv requirements at the beginning
+        # Inject uv requirements and status instructions at the beginning
         uv_requirements = self._get_uv_requirements_section()
-        return uv_requirements + "\n\n" + markdown.strip()
+        status_instructions = self._get_status_instructions_section()
+        return uv_requirements + "\n\n" + status_instructions + "\n\n" + markdown.strip()
 
     def _get_uv_requirements_section(self) -> str:
         """Return strict uv usage requirements for WAA prompts."""
@@ -578,3 +580,51 @@ Examples:
 - To run with arguments: `uv run train.py --epochs 10`
 
 **VIOLATION OF THESE RULES WILL CAUSE EXPERIMENT FAILURE.**'''
+
+    def _get_status_instructions_section(self) -> str:
+        """Return status file management instructions for WAA prompts."""
+        # Try to load from template file
+        template_path = os.path.join(self.prompts_dir, "WAA", "status_instructions.md")
+        if os.path.exists(template_path):
+            try:
+                with open(template_path, 'r') as f:
+                    return f.read()
+            except Exception as e:
+                self.logger.warning(f"Failed to load status instructions template: {e}")
+
+        # Fallback to inline instructions
+        return self._get_inline_status_instructions()
+
+    def _get_inline_status_instructions(self) -> str:
+        """Fallback inline status instructions when template not available."""
+        return '''## CRITICAL: Experiment Status Management
+
+You MUST maintain `experiment-status.yaml` to communicate your progress.
+
+### Status Values
+- **IDLE**: Default, short operations (<10 min). Continue working normally.
+- **RUNNING**: Long operations (>10 min). Set this, start background training, **EXIT IMMEDIATELY**.
+- **COMPLETE**: All outputs ready. Set this, **EXIT IMMEDIATELY**.
+- **ERROR**: Unrecoverable error. Explain problem, **EXIT IMMEDIATELY**.
+
+### Before Long Training (>10 minutes)
+1. Update status to RUNNING:
+```bash
+cat >> experiment-status.yaml << 'EOF'
+  - timestamp: "$(date -Iseconds)"
+    status: RUNNING
+    message: "Starting model training"
+EOF
+```
+2. Start training in background: `nohup uv run train.py > training.log 2>&1 &`
+3. **EXIT the session immediately** - do NOT wait for training
+
+The system will automatically resume when training completes (detects low GPU/CPU usage and no file writes).
+
+### When Work is Complete
+1. Create all output files (result_{exp_id}.json, submission_{exp_id}.csv)
+2. Update status to COMPLETE
+3. Create DONE_{exp_id} marker
+4. **EXIT immediately**
+
+**CRITICAL**: After setting RUNNING or COMPLETE, you MUST exit the session!'''

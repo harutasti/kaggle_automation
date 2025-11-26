@@ -11,6 +11,8 @@ from ..core.base_component import BaseComponent
 from ..data_models import ExperimentHypothesis
 from ..utils.file_utils import ensure_dir, remove_dir
 from .codex_launcher import CodexExperimentLauncher
+from .session_manager import SessionManager, SessionStatus
+from ..utils.resource_monitor import ResourceMonitor
 
 class ExperimentOrchestrator(BaseComponent):
     def __init__(self, config: dict):
@@ -36,6 +38,12 @@ class ExperimentOrchestrator(BaseComponent):
             self.codex_launcher = CodexExperimentLauncher(config)
         else:
             self.logger.info("Using simulation execution mode")
+
+        # Initialize session manager for long-running experiment tracking
+        self.session_manager = SessionManager(self.experiment_run_dir, self.logger)
+
+        # Track resource monitors for RUNNING experiments
+        self._resource_monitors: Dict[str, ResourceMonitor] = {}
 
     def _get_git_repo(self):
         """Return the Git repository for the current directory."""
@@ -154,6 +162,13 @@ class ExperimentOrchestrator(BaseComponent):
                 except Exception as e:
                     self.logger.warning(f"Failed to run uv sync: {e}")
 
+                # Create initial experiment-status.yaml for session tracking
+                try:
+                    self.session_manager.create_status_file(worktree_path, exp_id)
+                    self.logger.info(f"Created experiment-status.yaml in {worktree_path}")
+                except Exception as e:
+                    self.logger.warning(f"Failed to create status file: {e}")
+
                 # 2. Launch per execution mode
                 if self.execution_mode == "codex":
                     # Codex mode: use codex exec
@@ -237,58 +252,189 @@ Please execute the experiment exactly as described above. Ensure you:
 
 
     def check_running_experiments(self) -> List[str]:
-        """Check running experiment processes and return IDs that have completed."""
-        method_name = "check_running_experiments"
-        # self._log_start(method_name)  # Suppressed to avoid noisy logs
+        """Check running experiments with status-aware completion detection."""
         completed_ids = []
         still_active_processes = {}
+        sessions_needing_resume = []
 
         if not self.active_processes:
-            # self._log_end(method_name, result=[])
             return []
 
         for exp_id, (process, worktree_path) in self.active_processes.items():
             done_file_path = os.path.join(worktree_path, f"DONE_{exp_id}")
-            if os.path.exists(done_file_path):  # Use DONE file as completion signal
-                # Check if process is still running
-                poll_result = process.poll()
-                if poll_result is None:  # Process is still running
-                     self.logger.warning(f"DONE file found for {exp_id}, but process (PID: {process.pid}) is still running. Terminating process.")
-                     try:
-                          process.terminate()
-                          # Give it a moment to terminate
-                          time.sleep(2)
-                          if process.poll() is None:  # Still not terminated
-                               self.logger.error(f"Process {exp_id} did not terminate gracefully. Killing forcefully.")
-                               process.kill()
-                     except Exception as e:
-                          self.logger.error(f"Error terminating process {exp_id}: {e}")
 
-                # Save JSONL output from Codex process
-                self._save_codex_jsonl_output(exp_id, process, worktree_path)
+            # 1. Read current status from experiment-status.yaml
+            current_status = self.session_manager.read_current_status(worktree_path)
 
-                self.logger.info(f"Experiment {exp_id} completed.")
+            # 2. Check status-based completion
+            if current_status:
+                if current_status.status == SessionStatus.COMPLETE:
+                    # Training complete, collect results
+                    self._finalize_completed_experiment(exp_id, process, worktree_path)
+                    completed_ids.append(exp_id)
+                    continue
+                elif current_status.status == SessionStatus.ERROR:
+                    # Error state, mark failed and collect what we can
+                    self._handle_error_experiment(exp_id, process, worktree_path, current_status)
+                    completed_ids.append(exp_id)
+                    continue
+                elif current_status.status == SessionStatus.RUNNING:
+                    # Process exited with RUNNING status - check if training is complete
+                    if process.poll() is not None:
+                        # Codex session exited, training may still be running in background
+                        if self._is_training_complete(exp_id, worktree_path):
+                            sessions_needing_resume.append((exp_id, process, worktree_path))
+                        else:
+                            # Training still running, keep tracking
+                            still_active_processes[exp_id] = (process, worktree_path)
+                    else:
+                        # Codex session still running
+                        still_active_processes[exp_id] = (process, worktree_path)
+                    continue
+
+            # 3. Fallback: check DONE file (backward compatibility)
+            if os.path.exists(done_file_path):
+                self._finalize_completed_experiment(exp_id, process, worktree_path)
                 completed_ids.append(exp_id)
-                # Prefer to clean worktree after RAD collects results
-                # self.cleanup_worktree(exp_id, worktree_path)
-            elif process.poll() is not None:  # Process has terminated
-                 # No DONE file but process exited -> likely abnormal termination
-                 self.logger.error(f"Process for experiment {exp_id} (PID: {process.pid}) terminated unexpectedly without creating DONE file. Marking as failed.")
-                 # Save JSONL output even for failed experiments (for debugging)
-                 self._save_codex_jsonl_output(exp_id, process, worktree_path)
-                 # Create failure marker for downstream handling
-                 with open(done_file_path, 'w') as f:
-                     f.write("UNEXPECTED_FAILURE")
-                 completed_ids.append(exp_id)
+            elif process.poll() is not None:
+                # Process exited without DONE or status file
+                self._handle_unexpected_exit(exp_id, process, worktree_path)
+                completed_ids.append(exp_id)
             else:
-                # Still running
                 still_active_processes[exp_id] = (process, worktree_path)
 
+        # 4. Handle sessions needing resume
+        for exp_id, process, worktree_path in sessions_needing_resume:
+            resumed = self._trigger_resume(exp_id, process, worktree_path)
+            if resumed:
+                # Resume started, keep tracking with new process
+                if exp_id in self._resumed_processes:
+                    still_active_processes[exp_id] = self._resumed_processes[exp_id]
+            else:
+                # Resume failed, mark as failed
+                done_file_path = os.path.join(worktree_path, f"DONE_{exp_id}")
+                with open(done_file_path, 'w') as f:
+                    f.write("RESUME_FAILURE")
+                completed_ids.append(exp_id)
+
         self.active_processes = still_active_processes
-        # if completed_ids:
-        #     self.logger.info(f"Detected completed experiments: {completed_ids}")
-        # self._log_end(method_name, result=completed_ids)
         return completed_ids
+
+    def _finalize_completed_experiment(self, exp_id: str, process: subprocess.Popen, worktree_path: str):
+        """Finalize a completed experiment."""
+        # Terminate process if still running
+        if process.poll() is None:
+            self.logger.warning(f"Process for {exp_id} still running at completion. Terminating.")
+            try:
+                process.terminate()
+                time.sleep(2)
+                if process.poll() is None:
+                    process.kill()
+            except Exception as e:
+                self.logger.error(f"Error terminating process {exp_id}: {e}")
+
+        # Save JSONL output
+        self._save_codex_jsonl_output(exp_id, process, worktree_path)
+
+        # Ensure DONE file exists
+        done_file_path = os.path.join(worktree_path, f"DONE_{exp_id}")
+        if not os.path.exists(done_file_path):
+            with open(done_file_path, 'w') as f:
+                f.write("SUCCESS")
+
+        self.logger.info(f"Experiment {exp_id} completed successfully.")
+
+        # Log session event
+        self.session_manager.log_session_event(exp_id, "COMPLETE", SessionStatus.COMPLETE)
+
+    def _handle_error_experiment(self, exp_id: str, process: subprocess.Popen, worktree_path: str, status):
+        """Handle an experiment that ended with ERROR status."""
+        self._save_codex_jsonl_output(exp_id, process, worktree_path)
+
+        done_file_path = os.path.join(worktree_path, f"DONE_{exp_id}")
+        with open(done_file_path, 'w') as f:
+            f.write(f"ERROR: {status.message}")
+
+        self.logger.error(f"Experiment {exp_id} failed with error: {status.message}")
+
+        # Log session event
+        self.session_manager.log_session_event(
+            exp_id, "ERROR", SessionStatus.ERROR,
+            {'error_type': status.error_type, 'message': status.message}
+        )
+
+    def _handle_unexpected_exit(self, exp_id: str, process: subprocess.Popen, worktree_path: str):
+        """Handle process that exited without proper completion."""
+        self.logger.error(f"Process for {exp_id} terminated unexpectedly. Marking as failed.")
+        self._save_codex_jsonl_output(exp_id, process, worktree_path)
+
+        done_file_path = os.path.join(worktree_path, f"DONE_{exp_id}")
+        with open(done_file_path, 'w') as f:
+            f.write("UNEXPECTED_FAILURE")
+
+    def _is_training_complete(self, exp_id: str, worktree_path: str) -> bool:
+        """Check if training is complete using resource monitoring."""
+        # Get or create resource monitor for this experiment
+        if exp_id not in self._resource_monitors:
+            self._resource_monitors[exp_id] = ResourceMonitor(worktree_path, self.logger)
+
+        monitor = self._resource_monitors[exp_id]
+        idle_threshold = self.config.get("training_idle_threshold_minutes", 3)
+
+        return monitor.is_training_likely_complete(idle_threshold_minutes=idle_threshold)
+
+    def _trigger_resume(self, exp_id: str, process: subprocess.Popen, worktree_path: str) -> bool:
+        """Trigger Codex resume using `codex resume --last`."""
+        self.logger.info(f"Triggering session resume for {exp_id}")
+
+        # Track resumed processes
+        if not hasattr(self, '_resumed_processes'):
+            self._resumed_processes = {}
+
+        # Read training log for context
+        training_log_tail = ""
+        log_path = os.path.join(worktree_path, "training.log")
+        if os.path.exists(log_path):
+            try:
+                with open(log_path, 'r') as f:
+                    training_log_tail = f.read()[-10000:]  # Last 10KB
+            except Exception as e:
+                self.logger.warning(f"Failed to read training log: {e}")
+
+        exit_code = process.poll() if process.poll() is not None else 0
+
+        try:
+            # Import resume function
+            from ..utils.codex_executor import execute_codex_resume, build_resume_prompt
+
+            resume_prompt = build_resume_prompt(exp_id, exit_code, training_log_tail)
+
+            # Use `codex resume --last` to continue the session
+            codex_responses_dir = os.path.join(self.experiment_run_dir, "codex-responses", "WAA")
+            result = execute_codex_resume(
+                experiment_id=exp_id,
+                worktree_path=worktree_path,
+                codex_responses_dir=codex_responses_dir,
+                resume_prompt=resume_prompt,
+                timeout=self.config.get("waa_resume_timeout", 600),
+                logger=self.logger
+            )
+
+            if result.success:
+                self.logger.info(f"Resume completed for {exp_id}")
+                # Log session event
+                self.session_manager.log_session_event(exp_id, "RESUME", SessionStatus.RUNNING)
+                return True
+            else:
+                self.logger.error(f"Resume failed for {exp_id}: {result.error}")
+                return False
+
+        except ImportError as e:
+            self.logger.error(f"Cannot import resume function: {e}")
+            return False
+        except Exception as e:
+            self.logger.error(f"Resume failed for {exp_id}: {e}")
+            return False
 
     def _save_codex_jsonl_output(self, exp_id: str, process: subprocess.Popen, worktree_path: str):
         """Save JSONL output from completed Codex process to worktree directory."""

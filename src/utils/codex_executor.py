@@ -797,6 +797,209 @@ def execute_codex(
         )
 
 
+def build_resume_prompt(exp_id: str, exit_code: int, training_log_tail: str) -> str:
+    """
+    Build prompt to guide resumed session after training completes.
+
+    Args:
+        exp_id: Experiment identifier
+        exit_code: Exit code from previous process (0 = success)
+        training_log_tail: Last portion of training log
+
+    Returns:
+        Formatted prompt string for resume session
+    """
+    return f"""The training process has completed or exited.
+
+**Experiment ID**: {exp_id}
+**Exit Code**: {exit_code}
+
+**Training Log (last 10KB)**:
+```
+{training_log_tail[-10000:] if training_log_tail else '[No training log found]'}
+```
+
+**Your Task**:
+
+1. **Check if training completed successfully**:
+   - Look for model files (.pkl, .pt, .pth, .bin, .h5, .joblib)
+   - Check the training log for completion messages or final metrics
+   - Verify no error messages in the log
+
+2. **If training was successful**:
+   - Run inference on the test data if not already done
+   - Create `result_{exp_id}.json` with the validation/CV score:
+     ```json
+     {{"score": <validation_score>}}
+     ```
+   - Create `submission_{exp_id}.csv` with predictions in competition format
+   - Update `experiment-status.yaml`:
+     ```yaml
+       - timestamp: "<current_timestamp>"
+         status: COMPLETE
+         message: "Training complete. Score: <score>"
+     ```
+   - Create `DONE_{exp_id}` file with "SUCCESS"
+
+3. **If training failed**:
+   - Analyze the error from the training log
+   - Update `experiment-status.yaml`:
+     ```yaml
+       - timestamp: "<current_timestamp>"
+         status: ERROR
+         message: "<error description>"
+         error_type: "<error_category>"
+         recovery_suggestion: "<what could fix it>"
+     ```
+   - Create `DONE_{exp_id}` file with "FAILURE: <reason>"
+
+**IMPORTANT**: After completing these tasks, exit immediately.
+"""
+
+
+def execute_codex_resume(
+    experiment_id: str,
+    worktree_path: str | Path,
+    codex_responses_dir: str | Path,
+    resume_prompt: str,
+    timeout: int = 600,
+    logger: Optional[logging.Logger] = None
+) -> CodexResult:
+    """
+    Resume a Codex session using `codex resume --last`.
+
+    This uses Codex's built-in session resume feature which continues
+    the previous conversation in the worktree directory.
+
+    Args:
+        experiment_id: Experiment identifier
+        worktree_path: Path to the experiment worktree (for cwd)
+        codex_responses_dir: Directory for JSONL output logs
+        resume_prompt: Prompt providing context about what happened
+        timeout: Maximum execution time in seconds
+        logger: Optional logger instance
+
+    Returns:
+        CodexResult with execution details
+    """
+    if logger is None:
+        logger = logging.getLogger("AutoKaggle.CodexExecutor")
+
+    worktree_path = Path(worktree_path)
+    codex_responses_dir = Path(codex_responses_dir)
+
+    start_time = time.time()
+    logger.info(f"Resuming Codex session for {experiment_id} in {worktree_path}")
+
+    try:
+        # Use codex resume --last to continue the previous session
+        # The resume_prompt is passed via stdin to provide context
+        proc = subprocess.run(
+            ["codex", "resume", "--last", "--json"],
+            input=resume_prompt.encode("utf-8"),
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            cwd=str(worktree_path),
+            timeout=timeout,
+            check=False
+        )
+
+        execution_time = time.time() - start_time
+        raw_output = proc.stdout.decode("utf-8", errors="replace")
+
+        logger.info(f"Codex resume completed in {execution_time:.2f}s with exit code {proc.returncode}")
+
+        # Save JSONL output for audit trail
+        codex_responses_dir.mkdir(parents=True, exist_ok=True)
+        jsonl_path = codex_responses_dir / f"resume-{experiment_id}.jsonl"
+        jsonl_path.write_text(raw_output, encoding="utf-8")
+        logger.info(f"Saved resume JSONL output to {jsonl_path}")
+
+        # Check for completion indicators
+        done_file = worktree_path / f"DONE_{experiment_id}"
+        result_file = worktree_path / f"result_{experiment_id}.json"
+
+        if done_file.exists():
+            # Check DONE file content
+            done_content = done_file.read_text().strip()
+            success = done_content.startswith("SUCCESS") or done_content == "SUCCESS"
+
+            result_data = None
+            if result_file.exists():
+                try:
+                    with open(result_file, 'r') as f:
+                        result_data = json.load(f)
+                except Exception as e:
+                    logger.warning(f"Failed to parse result file: {e}")
+
+            return CodexResult(
+                success=success,
+                mode=CodexMode.WAA,
+                execution_time=execution_time,
+                raw_output=raw_output,
+                experiment_id=experiment_id,
+                result_data=result_data,
+                error=None if success else f"Experiment failed: {done_content}"
+            )
+
+        # No DONE file - check if process ran successfully
+        if proc.returncode == 0:
+            return CodexResult(
+                success=True,
+                mode=CodexMode.WAA,
+                execution_time=execution_time,
+                raw_output=raw_output,
+                experiment_id=experiment_id
+            )
+
+        return CodexResult(
+            success=False,
+            mode=CodexMode.WAA,
+            execution_time=execution_time,
+            raw_output=raw_output,
+            experiment_id=experiment_id,
+            error=f"Codex resume exited with code {proc.returncode}",
+            error_type="RESUME_FAILURE"
+        )
+
+    except subprocess.TimeoutExpired:
+        execution_time = time.time() - start_time
+        logger.error(f"Codex resume timed out after {timeout}s")
+        return CodexResult(
+            success=False,
+            mode=CodexMode.WAA,
+            execution_time=execution_time,
+            raw_output="",
+            experiment_id=experiment_id,
+            error=f"Resume timed out after {timeout}s",
+            error_type="TIMEOUT"
+        )
+
+    except FileNotFoundError:
+        logger.error("Codex CLI not found. Is it installed?")
+        return CodexResult(
+            success=False,
+            mode=CodexMode.WAA,
+            execution_time=0.0,
+            raw_output="",
+            experiment_id=experiment_id,
+            error="Codex CLI not found",
+            error_type="CODEX_NOT_FOUND"
+        )
+
+    except Exception as e:
+        execution_time = time.time() - start_time
+        logger.error(f"Codex resume failed: {e}")
+        return CodexResult(
+            success=False,
+            mode=CodexMode.WAA,
+            execution_time=execution_time,
+            raw_output="",
+            experiment_id=experiment_id,
+            error=str(e),
+            error_type="EXECUTION_ERROR"
+        )
+
 # Example usage
 if __name__ == "__main__":
     # Setup logging

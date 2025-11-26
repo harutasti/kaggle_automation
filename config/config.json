@@ -16,7 +16,10 @@
   "prompts_dir": "prompts",
   "experiment_pyproject_path": "config/experiment_pyproject.toml",
   "kse_codex_enabled": true,
-  "kse_codex_timeout": 600,
+  "kse_codex_timeout": 3600,
   "pa_codex_enabled": true,
-  "pa_codex_timeout": 300
+  "pa_codex_timeout": 3600,
+  "waa_resume_timeout": 3600,
+  "training_idle_threshold_minutes": 3,
+  "resource_monitor_interval_seconds": 30
 }
