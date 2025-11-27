@@ -2,6 +2,7 @@ import os
 import json
 import re
 import datetime
+import glob
 from typing import List, Dict, Optional
 
 from ..core.base_component import BaseComponent
@@ -61,8 +62,14 @@ class ResultAggregatorDatabase(BaseComponent):
 
         write_json(serializable_data, self.manifest_file)
 
-    def collect_result(self, exp_id: str, worktree_path: str) -> Optional[ExperimentResult]:
-        """Collect results from a worktree and save them to the manifest."""
+    def collect_result(self, exp_id: str, worktree_path: str, hypothesis: Optional[ExperimentHypothesis] = None) -> Optional[ExperimentResult]:
+        """Collect results from a worktree and save them to the manifest.
+
+        Args:
+            exp_id: Experiment identifier
+            worktree_path: Path to the experiment worktree
+            hypothesis: Optional hypothesis to populate metadata (iteration, strategy, params)
+        """
         method_name = "collect_result"
         self._log_start(method_name, exp_id=exp_id, worktree_path=worktree_path)
 
@@ -114,14 +121,38 @@ class ResultAggregatorDatabase(BaseComponent):
              collected_log_path_relative = None  # If log missing
 
         # Other potential outputs (submission, model, etc.)
-        potential_files = [f"submission_{exp_id}.csv", f"model_{exp_id}.pkl"]  # Add more if needed
-        for fname in potential_files:
+        # First try exact matches for expected file names
+        exact_files = [f"submission_{exp_id}.csv", f"model_{exp_id}.pkl"]
+        for fname in exact_files:
             src_path = os.path.join(worktree_path, fname)
             if os.path.exists(src_path):
                 dst_relative = os.path.join(exp_id, fname)
                 dst_absolute = os.path.join(self.results_base_dir, dst_relative)
                 copy_file(src_path, dst_absolute)
                 collected_files_relative.append(dst_relative)
+
+        # Then glob for common submission/prediction file patterns
+        # This catches files like: predictions.csv, submission_final.csv, submission.csv, output.csv
+        glob_patterns = [
+            "*submission*.csv",
+            "*prediction*.csv",
+            "output.csv",
+            "*.pkl",
+            "*.joblib"
+        ]
+
+        for pattern in glob_patterns:
+            matching_files = glob.glob(os.path.join(worktree_path, pattern))
+            for src_path in matching_files:
+                fname = os.path.basename(src_path)
+                dst_relative = os.path.join(exp_id, fname)
+                dst_absolute = os.path.join(self.results_base_dir, dst_relative)
+
+                # Skip if already copied (from exact matches)
+                if dst_relative not in collected_files_relative:
+                    copy_file(src_path, dst_absolute)
+                    collected_files_relative.append(dst_relative)
+                    self.logger.info(f"Collected file via glob pattern '{pattern}': {fname}")
 
         # Copy JSONL output to codex-responses/WAA/ directory
         codex_output_jsonl = os.path.join(worktree_path, f"codex_output_{exp_id}.jsonl")
@@ -142,18 +173,33 @@ class ResultAggregatorDatabase(BaseComponent):
             copy_file(codex_output_jsonl, dst_path)
             self.logger.info(f"Copied JSONL output to {dst_path}")
 
-        # Build ExperimentResult (start/end times are placeholder values)
-        # TODO: Pull hypothesis info to populate iteration, strategy_name, parameters.
-        #       That data is not stored in the worktree; pass from MCDU or recover from exp_id.
+        # Build ExperimentResult
+        # Use hypothesis metadata if provided, otherwise use defaults
         dummy_start = datetime.datetime.now() - datetime.timedelta(minutes=1)
         dummy_end = datetime.datetime.now()
         dummy_duration = (dummy_end-dummy_start).total_seconds()
 
+        # Extract metadata from hypothesis if available
+        if hypothesis:
+            iteration = hypothesis.iteration
+            strategy_name = hypothesis.strategy_name
+            parameters = hypothesis.parameters
+            self.logger.info(f"Using hypothesis metadata: iteration={iteration}, strategy={strategy_name}")
+        else:
+            # Fallback: try to extract iteration from exp_id pattern (e.g., "iter0_exp1_abc123")
+            iteration = -1
+            strategy_name = "Unknown"
+            parameters = {}
+            match = re.match(r'iter(\d+)_', exp_id)
+            if match:
+                iteration = int(match.group(1))
+                self.logger.info(f"Extracted iteration {iteration} from exp_id")
+
         result = ExperimentResult(
             experiment_id=exp_id,
-            iteration=-1,  # To be populated
-            strategy_name="Unknown",  # To be populated
-            parameters={},  # To be populated
+            iteration=iteration,
+            strategy_name=strategy_name,
+            parameters=parameters,
             start_time=dummy_start,  # Should be recorded/saved by WAA simulator
             end_time=dummy_end,     # Should be recorded/saved by WAA simulator
             execution_time_seconds=dummy_duration,  # Should be calculated/saved by WAA simulator

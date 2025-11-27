@@ -49,6 +49,9 @@ class ExperimentOrchestrator(BaseComponent):
         # Track resumed processes for session continuation
         self._resumed_processes: Dict[str, Tuple[subprocess.Popen, str]] = {}
 
+        # Track resume retry counts per experiment (for failed resume attempts)
+        self._resume_retry_count: Dict[str, int] = {}
+
         # Initialize GPU allocator for parallel WAA resource management
         self.gpu_allocator = GPUAllocator(config)
         self.logger.info(f"GPU allocator initialized")
@@ -88,14 +91,22 @@ class ExperimentOrchestrator(BaseComponent):
             self.logger.error(f"Error during stale worktree cleanup: {e}")
 
 
-    def launch_experiments(self, hypotheses: List[ExperimentHypothesis]) -> List[str]:
-        """Launch WAA simulator or Codex processes in parallel for each hypothesis."""
+    def launch_experiments(self, hypotheses: List[ExperimentHypothesis]) -> Dict[str, any]:
+        """Launch WAA simulator or Codex processes in parallel for each hypothesis.
+
+        Returns:
+            Dict with keys:
+                - 'launched': List[str] - successfully launched experiment IDs
+                - 'failed': List[Dict] - failed launches with {'exp_id': str, 'reason': str}
+                - 'total': int - total number of hypotheses
+        """
         method_name = "launch_experiments"
         self._log_start(method_name, num_hypotheses=len(hypotheses))
         launched_ids = []
+        failed_launches = []
 
-        # Respect available CPU cores to avoid over-parallelism
-        max_workers = min(len(hypotheses), multiprocessing.cpu_count() * 2)  # e.g., up to 2x core count
+        # Note: max_workers calculated for potential future use with process pools
+        max_workers = min(len(hypotheses), multiprocessing.cpu_count() * 2)
         self.logger.info(f"Launching {len(hypotheses)} experiments with max {max_workers} parallel workers.")
 
         # Calculate total WAAs for GPU allocation
@@ -205,7 +216,7 @@ class ExperimentOrchestrator(BaseComponent):
                 # 2. Launch per execution mode
                 if self.execution_mode == "codex":
                     # Codex mode: use codex exec with GPU env vars
-                    process = self._launch_codex_experiment(hypothesis, worktree_path, exp_id, env=env)
+                    process = self._launch_codex_experiment(hypothesis, worktree_path, exp_id, env=env, gpu_allocation=gpu_allocation)
                 else:
                     # Simulation mode: use WAA simulator with GPU env vars
                     cmd = [
@@ -222,24 +233,39 @@ class ExperimentOrchestrator(BaseComponent):
                     launched_ids.append(exp_id)
 
             except git.GitCommandError as e:
+                error_msg = f"Git command failed: {e.stderr}"
                 self.logger.error(f"Git command failed for {exp_id} at {worktree_path}: {e.stderr}")
+                failed_launches.append({'exp_id': exp_id, 'reason': error_msg})
             except Exception as e:
+                error_msg = str(e)
                 self.logger.error(f"Failed to prepare or launch experiment {exp_id}: {e}")
+                failed_launches.append({'exp_id': exp_id, 'reason': error_msg})
 
         # Register processes in bulk
         for process, exp_id, worktree_path in processes_to_start:
              self.active_processes[exp_id] = (process, worktree_path)
              self.logger.info(f"Launched {'Codex' if self.execution_mode == 'codex' else 'WAA simulator'} process for experiment {exp_id} (PID: {process.pid})")
 
-        self._log_end(method_name, result=f"Launched {len(launched_ids)} processes.")
-        return launched_ids
+        # Log summary
+        if failed_launches:
+            self.logger.warning(f"Failed to launch {len(failed_launches)}/{len(hypotheses)} experiments")
+            for failure in failed_launches:
+                self.logger.warning(f"  - {failure['exp_id']}: {failure['reason']}")
+
+        self._log_end(method_name, result=f"Launched {len(launched_ids)}/{len(hypotheses)} processes.")
+        return {
+            'launched': launched_ids,
+            'failed': failed_launches,
+            'total': len(hypotheses)
+        }
 
     def _launch_codex_experiment(
         self,
         hypothesis: ExperimentHypothesis,
         worktree_path: str,
         exp_id: str,
-        env: Optional[Dict[str, str]] = None
+        env: Optional[Dict[str, str]] = None,
+        gpu_allocation: Optional[any] = None
     ) -> Optional[subprocess.Popen]:
         """Launch a single experiment using Codex.
 
@@ -248,16 +274,34 @@ class ExperimentOrchestrator(BaseComponent):
             worktree_path: Working directory for the experiment
             exp_id: Experiment identifier
             env: Environment variables to set (including GPU allocation)
+            gpu_allocation: GPU allocation information for this experiment
         """
         try:
             # Read task markdown
             with open(hypothesis.task_markdown_path, 'r', encoding='utf-8') as f:
                 task_content = f.read()
 
+            # Prepare hardware allocation info if available
+            hardware_info = ""
+            if gpu_allocation:
+                cuda_devices = gpu_allocation.cuda_visible_devices or "N/A (CPU only)"
+                hardware_info = f"""
+**HARDWARE ALLOCATION**:
+- GPUs assigned: {cuda_devices}
+- Memory fraction: {gpu_allocation.memory_fraction:.2f}
+- GPU count: {gpu_allocation.gpu_count}
+
+Please ensure your code respects these GPU constraints. The environment variables are already set:
+- CUDA_VISIBLE_DEVICES={cuda_devices}
+- TF_FORCE_GPU_ALLOW_GROWTH=true
+- If no GPU is assigned, use CPU only.
+
+"""
+
             # Prepare stdin for Codex
             stdin_input = f"""Your Task:
 {task_content}
-
+{hardware_info}
 Please execute the experiment exactly as described above. Ensure you:
 1. Create the result_{exp_id}.json file with the score
 2. Create the DONE_{exp_id} file when complete
@@ -311,7 +355,19 @@ Please execute the experiment exactly as described above. Ensure you:
             done_file_path = os.path.join(worktree_path, f"DONE_{exp_id}")
 
             # 1. Read current status from experiment-status.yaml
-            current_status = self.session_manager.read_current_status(worktree_path)
+            try:
+                current_status = self.session_manager.read_current_status(worktree_path)
+            except Exception as e:
+                self.logger.error(f"Status file corrupted for {exp_id}: {e}")
+                # Create error marker for debugging
+                error_marker = os.path.join(worktree_path, f"STATUS_ERROR_{exp_id}")
+                try:
+                    with open(error_marker, 'w') as f:
+                        f.write(f"Status file read error: {e}")
+                except:
+                    pass  # Don't fail on marker creation
+                current_status = None
+                self.logger.warning(f"Falling back to DONE file check for {exp_id} due to status file error")
 
             # 2. Check status-based completion
             if current_status:
@@ -354,15 +410,28 @@ Please execute the experiment exactly as described above. Ensure you:
         for exp_id, process, worktree_path in sessions_needing_resume:
             resumed = self._trigger_resume(exp_id, process, worktree_path)
             if resumed:
-                # Resume started, keep tracking with new process
+                # Resume started successfully, keep tracking with new process
                 if exp_id in self._resumed_processes:
                     still_active_processes[exp_id] = self._resumed_processes[exp_id]
+                # Reset retry count on successful resume
+                self._resume_retry_count[exp_id] = 0
             else:
-                # Resume failed, mark as failed
-                done_file_path = os.path.join(worktree_path, f"DONE_{exp_id}")
-                with open(done_file_path, 'w') as f:
-                    f.write("RESUME_FAILURE")
-                completed_ids.append(exp_id)
+                # Resume failed - check retry count
+                retry_count = self._resume_retry_count.get(exp_id, 0)
+                if retry_count < 1:
+                    # First failure - increment retry count and keep in active processes for retry
+                    self._resume_retry_count[exp_id] = retry_count + 1
+                    still_active_processes[exp_id] = (process, worktree_path)
+                    self.logger.warning(f"Resume failed for {exp_id} (attempt {retry_count + 1}/2). Will retry next check.")
+                else:
+                    # Second failure - mark as failed and complete
+                    self.logger.error(f"Resume failed for {exp_id} after {retry_count + 1} attempts. Marking as failed.")
+                    done_file_path = os.path.join(worktree_path, f"DONE_{exp_id}")
+                    with open(done_file_path, 'w') as f:
+                        f.write("RESUME_FAILURE")
+                    completed_ids.append(exp_id)
+                    # Clean up retry count
+                    self._resume_retry_count.pop(exp_id, None)
 
         self.active_processes = still_active_processes
         return completed_ids

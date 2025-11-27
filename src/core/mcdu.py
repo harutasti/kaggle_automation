@@ -128,14 +128,28 @@ class MasterControllerDecisionUnit(BaseComponent):
                 self.stop_reason = "User cancelled experiment execution"
                 break
 
-            launched_ids = self.eo.launch_experiments(hypotheses)
+            launch_result = self.eo.launch_experiments(hypotheses)
+            launched_ids = launch_result['launched']
+            failed_launches = launch_result['failed']
+            total_requested = launch_result['total']
+
             if not launched_ids:
                  self.logger.warning(f"No experiments were launched for iteration {self.current_iteration}. Stopping.")
                  self.user_confirm.show_error("Failed to launch experiments")
                  self.stop_reason = "Experiment launch failed"
                  break
 
-            self.user_confirm.show_success(f"Launched {len(launched_ids)} experiments")
+            # Warn if some experiments failed to launch
+            if failed_launches:
+                self.logger.warning(f"Partial launch: {len(launched_ids)}/{total_requested} experiments launched")
+                for failure in failed_launches:
+                    self.logger.warning(f"  Failed: {failure['exp_id']} - {failure['reason']}")
+                self.user_confirm.show_warning(
+                    f"Only {len(launched_ids)}/{total_requested} experiments launched. "
+                    f"{len(failed_launches)} failed to start."
+                )
+
+            self.user_confirm.show_success(f"Launched {len(launched_ids)}/{total_requested} experiments")
 
             running_experiments = set(launched_ids)
             hypotheses_map = {h.experiment_id: h for h in hypotheses}  # Map ID -> hypothesis
@@ -151,15 +165,13 @@ class MasterControllerDecisionUnit(BaseComponent):
                      self.logger.info(f"Experiments completed: {list(newly_completed)}")
                      for exp_id in newly_completed:
                          worktree_path = self.eo.get_worktree_path(exp_id)
-                         result = self.rad.collect_result(exp_id, worktree_path)
+                         # Pass hypothesis directly to collect_result for proper metadata
+                         hypothesis = hypotheses_map.get(exp_id)
+                         if not hypothesis:
+                             self.logger.warning(f"Hypothesis not found for {exp_id}, collecting with limited metadata")
+                         result = self.rad.collect_result(exp_id, worktree_path, hypothesis=hypothesis)
                          if result:
-                              # After RAD collects, update metadata with hypothesis
-                              if exp_id in hypotheses_map:
-                                   self.rad.update_result_metadata(exp_id, hypotheses_map[exp_id])
-                                   result = self.rad.get_result(exp_id)  # Re-fetch after update
-                                   iteration_results.append(result)
-                              else:
-                                   self.logger.error(f"Hypothesis not found for completed experiment {exp_id}!")
+                             iteration_results.append(result)
                          else:
                               self.logger.error(f"Failed to collect result for {exp_id}")
 
@@ -224,9 +236,22 @@ class MasterControllerDecisionUnit(BaseComponent):
 
             # 2f. Cleanup worktrees (after PA has finished analyzing)
             if self.pending_cleanup:
-                self.logger.info(f"Cleaning up {len(self.pending_cleanup)} worktrees")
-                for exp_id, worktree_path in self.pending_cleanup.items():
-                    self.eo.cleanup_worktree(exp_id, worktree_path)
+                # Safety check: ensure no experiments are pending resume before cleanup
+                still_active = set(self.eo.active_processes.keys())
+                safe_to_cleanup = {
+                    exp_id: path for exp_id, path in self.pending_cleanup.items()
+                    if exp_id not in still_active
+                }
+
+                if len(safe_to_cleanup) < len(self.pending_cleanup):
+                    skipped = set(self.pending_cleanup.keys()) - set(safe_to_cleanup.keys())
+                    self.logger.warning(f"Skipping cleanup for {len(skipped)} experiments still active: {skipped}")
+
+                if safe_to_cleanup:
+                    self.logger.info(f"Cleaning up {len(safe_to_cleanup)} worktrees")
+                    for exp_id, worktree_path in safe_to_cleanup.items():
+                        self.eo.cleanup_worktree(exp_id, worktree_path)
+
                 self.pending_cleanup.clear()
 
             # 2g. Update overall best and check improvement
