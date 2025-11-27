@@ -17,9 +17,7 @@ class ResultAggregatorDatabase(BaseComponent):
         self.results_base_dir = os.path.join(self.experiment_run_dir, "results")
         self.manifest_file = os.path.join(self.results_base_dir, "results_manifest.json")
 
-        # Only ensure directory if not in dry-run mode
-        if not config.get("dry_run", False):
-            ensure_dir(self.results_base_dir)
+        ensure_dir(self.results_base_dir)
 
         self.results_cache: Dict[str, ExperimentResult] = self._load_manifest()
 

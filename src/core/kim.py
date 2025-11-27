@@ -20,10 +20,8 @@ class KaggleInterfaceManager(BaseComponent):
         # Use experiment_run_dir if available (timestamped), otherwise fall back to experiments_base_dir
         self.experiment_run_dir = config.get("experiment_run_dir", config.get("experiments_base_dir", "./experiments"))
         self.download_dir = os.path.join(self.experiment_run_dir, "kaggle_data")
-
-        # Only ensure directory if not in dry-run mode
-        if not config.get("dry_run", False):
-            ensure_dir(self.download_dir)
+        self.dry_run = config.get("dry_run", False)
+        ensure_dir(self.download_dir)
 
         self.api = self._authenticate_kaggle()
         self.simulation_mode = config.get("simulation_mode", False)
@@ -36,6 +34,9 @@ class KaggleInterfaceManager(BaseComponent):
 
     def _authenticate_kaggle(self):
         """Authenticate with the Kaggle API."""
+        if self.dry_run:
+            self.logger.info("DRY-RUN: Skipping Kaggle authentication")
+            return None
         try:
             # Import here to avoid authentication at module import time
             from kaggle.api.kaggle_api_extended import KaggleApi
@@ -83,6 +84,17 @@ class KaggleInterfaceManager(BaseComponent):
         method_name = "get_competition_info"
         self._log_start(method_name)
         try:
+            if self.dry_run:
+                dummy_deadline = datetime.datetime.now() + datetime.timedelta(days=30)
+                info = CompetitionInfo(
+                    name=self.competition_name,
+                    evaluation_metric="AUC",
+                    deadline=dummy_deadline,
+                    description_markdown=f"# Competition: {self.competition_name}\n\nDRY-RUN placeholder description.",
+                    data_files=["train.csv", "test.csv", "sample_submission.csv"]
+                )
+                self._log_end(method_name, info)
+                return info
             # First, try to use crawler data if enabled
             if self.use_crawler and not self.simulation_mode:
                 # Check if crawler data exists
@@ -162,6 +174,25 @@ class KaggleInterfaceManager(BaseComponent):
         self._log_start(method_name, competition_name=competition_info.name)
         try:
             ensure_dir(self.download_dir)
+
+            if self.dry_run:
+                # Create realistic placeholder data files to mimic a full run
+                placeholders = {
+                    "train.csv": "id,feature1,target\n1,0.1,0\n2,0.2,1\n",
+                    "test.csv": "id,feature1\n1,0.0\n2,0.1\n",
+                    "sample_submission.csv": "id,prediction\n1,0.5\n2,0.5\n",
+                }
+                for filename, content in placeholders.items():
+                    path = os.path.join(self.download_dir, filename)
+                    if not os.path.exists(path):
+                        with open(path, "w", encoding="utf-8") as f:
+                            f.write(content)
+                        self.logger.info(f"DRY-RUN: Created placeholder {filename}")
+                competition_info.data_files = list(placeholders.keys())
+                if self.analyze_dataset:
+                    self._analyze_competition_dataset()
+                self._log_end(method_name, result=True)
+                return True
             
             # First, check if crawler has already downloaded the data
             if self.use_crawler and not self.simulation_mode:

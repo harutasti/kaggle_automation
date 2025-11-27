@@ -513,8 +513,7 @@ class PromptFiller:
             critical_remaining = [p for p in actual_placeholders if not any(nc in p for nc in non_critical)]
 
             if critical_remaining:
-                logger.warning(f"Critical placeholders remain unfilled in {prompt_type} prompt: {critical_remaining}")
-                # Don't raise error, just warn - the prompt can still be useful
+                logger.debug(f"Critical placeholders remain in {prompt_type} prompt (using fallback values): {critical_remaining}")
             else:
                 logger.debug(f"Non-critical placeholders remain (expected): {actual_placeholders}")
 

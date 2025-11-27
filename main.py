@@ -90,22 +90,19 @@ def main():
     config['experiment_run_dir'] = experiment_run_dir
     config['timestamp'] = timestamp
 
-    # Only create directories if not in dry-run mode
-    if not dry_run:
-        logger.info(f"Creating experiment directories at: {experiment_run_dir}")
-        ensure_dir(experiment_run_dir)
-        ensure_dir(os.path.join(experiment_run_dir, "worktrees"))
-        ensure_dir(os.path.join(experiment_run_dir, "results"))
-        ensure_dir(os.path.join(experiment_run_dir, "hypotheses"))
-        ensure_dir(os.path.join(experiment_run_dir, "analysis"))
-        ensure_dir(os.path.join(experiment_run_dir, "kaggle_data"))
-        # Create codex-responses directories for JSONL output logging
-        ensure_dir(os.path.join(experiment_run_dir, "codex-responses"))
-        ensure_dir(os.path.join(experiment_run_dir, "codex-responses", "KSE"))
-        ensure_dir(os.path.join(experiment_run_dir, "codex-responses", "WAA"))
-        ensure_dir(os.path.join(experiment_run_dir, "codex-responses", "PA"))
-    else:
-        logger.info(f"DRY-RUN MODE: Would create directories at: {experiment_run_dir}")
+    # Create directories even in dry-run to mirror real structure
+    logger.info(f"{'DRY-RUN ' if dry_run else ''}Creating experiment directories at: {experiment_run_dir}")
+    ensure_dir(experiment_run_dir)
+    ensure_dir(os.path.join(experiment_run_dir, "worktrees"))
+    ensure_dir(os.path.join(experiment_run_dir, "results"))
+    ensure_dir(os.path.join(experiment_run_dir, "hypotheses"))
+    ensure_dir(os.path.join(experiment_run_dir, "analysis"))
+    ensure_dir(os.path.join(experiment_run_dir, "kaggle_data"))
+    # Create codex-responses directories for JSONL output logging
+    ensure_dir(os.path.join(experiment_run_dir, "codex-responses"))
+    ensure_dir(os.path.join(experiment_run_dir, "codex-responses", "KSE"))
+    ensure_dir(os.path.join(experiment_run_dir, "codex-responses", "WAA"))
+    ensure_dir(os.path.join(experiment_run_dir, "codex-responses", "PA"))
 
 
     try:

@@ -62,7 +62,7 @@ class MasterControllerDecisionUnit(BaseComponent):
         self._log_start("run_main_loop")
 
         # 1. Initialization: fetch competition info & download data
-        competition_name = self.config.get("competition", {}).get("name", "unknown")
+        competition_name = self.config.get("kaggle_competition_name", "unknown")
 
         # Confirm fetching competition info
         if not self.user_confirm.confirm_kaggle_fetch(competition_name):

@@ -19,9 +19,7 @@ class PerformanceAnalyzer(BaseComponent):
         # Worktrees directory for PA Codex execution (gives access to experiment files)
         self.worktrees_dir = os.path.join(self.experiment_run_dir, "worktrees")
 
-        # Only ensure directory if not in dry-run mode
-        if not config.get("dry_run", False):
-            ensure_dir(self.analysis_dir)
+        ensure_dir(self.analysis_dir)
 
         # Codex configuration
         self.use_codex = config.get("pa_codex_enabled", False)

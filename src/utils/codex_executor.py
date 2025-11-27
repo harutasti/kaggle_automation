@@ -85,15 +85,27 @@ def execute_codex_experiment(
     if logger is None:
         logger = logging.getLogger("AutoKaggle.CodexExecutor")
 
-    # If dry-run, return dummy success without checking files
+    # If dry-run, create placeholder artifacts and return success
     if dry_run:
-        logger.info(f"DRY-RUN: Would execute experiment {experiment_id}")
+        logger.info(f"DRY-RUN: Simulating execution for experiment {experiment_id}")
+        worktree_path.mkdir(parents=True, exist_ok=True)
+        done_file = worktree_path / f"DONE_{experiment_id}"
+        result_file = worktree_path / f"result_{experiment_id}.json"
+        submission_file = worktree_path / f"submission_{experiment_id}.csv"
+        log_file = worktree_path / f"waa_{experiment_id}.log"
+        # Populate dummy artifacts
+        result_payload = {"score": 0.5, "start_time": datetime.now().isoformat(), "end_time": datetime.now().isoformat()}
+        result_file.write_text(json.dumps(result_payload, indent=2), encoding="utf-8")
+        submission_file.write_text("id,prediction\n1,0.5\n2,0.5\n", encoding="utf-8")
+        done_file.write_text("SUCCESS", encoding="utf-8")
+        log_file.write_text("DRY-RUN: simulated execution log.\n", encoding="utf-8")
+        output_file.write_text("DRY-RUN: Codex output placeholder.\n", encoding="utf-8")
         return CodexResult(
             success=True,
             mode=CodexMode.WAA,
             experiment_id=experiment_id,
             execution_time=0.0,
-            result_data={},
+            result_data=result_payload,
             output_file=str(output_file)
         )
 
@@ -456,14 +468,29 @@ def execute_kse_hypothesis_generation(
     # Ensure output directory exists
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    # If dry-run, return dummy success
+    # If dry-run, synthesize hypotheses and files
     if dry_run:
-        logger.info(f"DRY-RUN: Would generate {num_hypotheses} KSE hypotheses for iteration {iteration}")
+        logger.info(f"DRY-RUN: Generating {num_hypotheses} placeholder KSE hypotheses for iteration {iteration}")
+        output_dir.mkdir(parents=True, exist_ok=True)
+        hypotheses = []
+        for i in range(1, num_hypotheses + 1):
+            exp_id = f"iter{iteration}_exp{i}_dryrun"
+            hyp_file = output_dir / f"{exp_id}_hypothesis.md"
+            hyp_file.write_text(f"# Hypothesis {exp_id}\n\n- Strategy: DryRunStrategy{i}\n", encoding="utf-8")
+            hypotheses.append({
+                "experiment_id": exp_id,
+                "strategy": f"DryRunStrategy{i}",
+                "parameters": {"dry_run": True, "index": i},
+                "file": str(hyp_file)
+            })
+        summary_path = output_dir / f"kse_summary_iter{iteration}.json"
+        summary_payload = {"iteration": iteration, "hypotheses": hypotheses}
+        summary_path.write_text(json.dumps(summary_payload, indent=2), encoding="utf-8")
         return CodexResult(
             success=True,
             mode=CodexMode.KSE,
             execution_time=0.0,
-            hypotheses=[],  # Empty in dry-run
+            hypotheses=hypotheses,
             output_file=str(output_file)
         )
 
@@ -625,14 +652,29 @@ def execute_pa_analysis(
     # Ensure output directory exists
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    # If dry-run, return dummy success
+    # If dry-run, create placeholder analysis artifacts
     if dry_run:
-        logger.info(f"DRY-RUN: Would analyze {len(results_data) if isinstance(results_data, list) else 0} results for iteration {iteration}")
+        logger.info(f"DRY-RUN: Simulating PA analysis for iteration {iteration}")
+        output_dir.mkdir(parents=True, exist_ok=True)
+        analysis_file = output_dir / f"analysis_iter{iteration}.md"
+        summary_file = output_dir / f"pa_summary_iter{iteration}.json"
+        analysis_file.write_text(f"# Analysis Report - Iteration {iteration}\n\nDRY-RUN placeholder.", encoding="utf-8")
+        summary_payload = {
+            "iteration": iteration,
+            "best_score": 0.5,
+            "best_experiment": "iter{}_exp1_dryrun".format(iteration),
+            "average_score": 0.5,
+            "success_rate": 1.0,
+            "recommended_strategies": ["DryRunStrategy1"],
+            "avoid_strategies": [],
+            "key_insights": ["DRY-RUN placeholder insights"]
+        }
+        summary_file.write_text(json.dumps(summary_payload, indent=2), encoding="utf-8")
         return CodexResult(
             success=True,
             mode=CodexMode.PA,
             execution_time=0.0,
-            analysis={},  # Empty in dry-run
+            analysis=summary_payload,
             output_file=str(output_file)
         )
 

@@ -21,10 +21,8 @@ class KnowledgeStrategyEngine(BaseComponent):
         # Use experiment_run_dir if available (timestamped), otherwise fall back to experiments_base_dir
         self.experiment_run_dir = config.get("experiment_run_dir", config.get("experiments_base_dir", "./experiments"))
         self.hypothesis_dir = os.path.join(self.experiment_run_dir, "hypotheses")
-
-        # Only ensure directory if not in dry-run mode
-        if not config.get("dry_run", False):
-            ensure_dir(self.hypothesis_dir)
+        self.dry_run = config.get("dry_run", False)
+        ensure_dir(self.hypothesis_dir)
 
         self.competition_name = config.get("kaggle_competition_name")
         self.use_crawler = config.get("use_crawler", True)

@@ -23,10 +23,8 @@ class ExperimentOrchestrator(BaseComponent):
         self.experiment_run_dir = config.get("experiment_run_dir", config.get("experiments_base_dir", "./experiments"))
         self.worktree_base_dir = os.path.abspath(os.path.join(self.experiment_run_dir, "worktrees"))
         self.wca_simulator_script = os.path.abspath(os.path.join(os.path.dirname(__file__), 'wca_simulator.py'))
-
-        # Only ensure directory if not in dry-run mode
-        if not config.get("dry_run", False):
-            ensure_dir(self.worktree_base_dir)
+        self.dry_run = config.get("dry_run", False)
+        ensure_dir(self.worktree_base_dir)
 
         self.repo = self._get_git_repo()
         self.active_processes: Dict[str, Tuple[subprocess.Popen, str]] = {} # {exp_id: (process, worktree_path)}
@@ -117,6 +115,39 @@ class ExperimentOrchestrator(BaseComponent):
         self.logger.info(self.gpu_allocator.get_allocation_summary(total_waas))
 
         processes_to_start = []
+
+        # Dry-run: simulate full lifecycle without external commands
+        if self.dry_run:
+            ensure_dir(self.worktree_base_dir)
+            for hypothesis in hypotheses:
+                exp_id = hypothesis.experiment_id
+                worktree_path = os.path.join(self.worktree_base_dir, exp_id)
+                ensure_dir(worktree_path)
+                # Create minimal artifacts
+                done_file = os.path.join(worktree_path, f"DONE_{exp_id}")
+                result_file = os.path.join(worktree_path, f"result_{exp_id}.json")
+                submission_file = os.path.join(worktree_path, f"submission_{exp_id}.csv")
+                log_file = os.path.join(worktree_path, f"waa_{exp_id}.log")
+                with open(done_file, "w") as f:
+                    f.write("SUCCESS")
+                with open(result_file, "w") as f:
+                    json.dump({"score": 0.5, "status": "DRY_RUN"}, f, indent=2)
+                with open(submission_file, "w") as f:
+                    f.write("id,prediction\n1,0.5\n2,0.5\n")
+                with open(log_file, "w") as f:
+                    f.write("DRY-RUN: simulated WAA execution log\n")
+                try:
+                    self.session_manager.create_status_file(worktree_path, exp_id)
+                except Exception:
+                    pass
+                self.active_processes[exp_id] = (None, worktree_path)
+                launched_ids.append(exp_id)
+            self._log_end(method_name, result=f"DRY-RUN: Simulated {len(launched_ids)}/{len(hypotheses)} processes.")
+            return {
+                'launched': launched_ids,
+                'failed': failed_launches,
+                'total': len(hypotheses)
+            }
         for hypothesis in hypotheses:
             exp_id = hypothesis.experiment_id
             worktree_path = os.path.join(self.worktree_base_dir, exp_id)
@@ -362,6 +393,11 @@ Please execute the experiment exactly as described above. Ensure you:
 
     def check_running_experiments(self) -> List[str]:
         """Check running experiments with status-aware completion detection."""
+        if self.dry_run:
+            completed = list(self.active_processes.keys())
+            self.active_processes = {}
+            return completed
+
         completed_ids = []
         still_active_processes = {}
         sessions_needing_resume = []
@@ -481,7 +517,7 @@ Please execute the experiment exactly as described above. Ensure you:
     def _finalize_completed_experiment(self, exp_id: str, process: subprocess.Popen, worktree_path: str):
         """Finalize a completed experiment."""
         # Terminate process if still running
-        if process.poll() is None:
+        if process and process.poll() is None:
             self.logger.warning(f"Process for {exp_id} still running at completion. Terminating.")
             try:
                 process.terminate()
@@ -592,7 +628,7 @@ Please execute the experiment exactly as described above. Ensure you:
 
     def _save_codex_jsonl_output(self, exp_id: str, process: subprocess.Popen, worktree_path: str):
         """Save JSONL output from completed Codex process to worktree directory."""
-        if self.execution_mode != "codex":
+        if self.execution_mode != "codex" or process is None:
             return  # Only for Codex mode
 
         try:
@@ -612,6 +648,10 @@ Please execute the experiment exactly as described above. Ensure you:
         method_name = "cleanup_worktree"
         self._log_start(method_name, exp_id=exp_id, path=worktree_path)
         try:
+            if self.dry_run:
+                remove_dir(worktree_path)
+                self._log_end(method_name)
+                return
             # Prune Git worktree metadata first
             self.repo.git.worktree('prune')
             # Remove the physical directory
