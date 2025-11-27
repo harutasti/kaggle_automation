@@ -77,10 +77,7 @@ def main():
     config['dry_run'] = dry_run
 
     # Get competition name and create timestamped directory
-    competition_name = config.get("competition", {}).get("name", "unknown")
-    if not competition_name:
-        # Fallback to old config format
-        competition_name = config.get("kaggle_competition_name", "unknown")
+    competition_name = config.get("kaggle_competition_name", "unknown")
 
     # Create timestamp for this experiment run
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -112,7 +109,7 @@ def main():
 
 
     try:
-        mcdu = MasterControllerDecisionUnit(config_file)
+        mcdu = MasterControllerDecisionUnit(config)
         mcdu.run_main_loop()
         logger.info("AutoKaggle finished successfully.")
     except Exception as e:

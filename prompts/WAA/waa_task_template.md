@@ -52,9 +52,9 @@ EOF
 3. **After setting RUNNING**: You MUST exit. The system monitors GPU/CPU utilization and will automatically resume your session when training appears complete (utilization drops and no model files are being written).
 
 4. **COMPLETE can only be used once**: Only set this when ALL of the following are ready:
-   - `result_{{exp_id}}.json` with validation score
-   - `submission_{{exp_id}}.csv` with predictions
-   - `DONE_{{exp_id}}` completion marker
+   - `result_{exp_id}.json` with validation score
+   - `submission_{exp_id}.csv` with predictions
+   - `DONE_{exp_id}` completion marker
 
 5. **ERROR must explain the problem**: Include what went wrong and potential solutions.
 
@@ -108,7 +108,7 @@ if [ -f "model.pkl" ] && [ -f "training.log" ]; then
 EOF
 
     # 4. Create completion marker
-    echo "SUCCESS" > DONE_{{exp_id}}
+    echo "SUCCESS" > DONE_{exp_id}
 else
     # Training failed
     cat >> experiment-status.yaml << 'EOF'
@@ -119,7 +119,7 @@ else
     recovery_suggestion: "Check training.log for errors, possibly reduce model complexity"
 EOF
 
-    echo "FAILURE" > DONE_{{exp_id}}
+    echo "FAILURE" > DONE_{exp_id}
 fi
 ```
 

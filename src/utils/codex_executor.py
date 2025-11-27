@@ -111,6 +111,7 @@ def execute_codex_experiment(
     if not worktree_path.exists():
         return CodexResult(
             success=False,
+            mode=CodexMode.WAA,
             experiment_id=experiment_id,
             execution_time=0.0,
             error=f"Worktree path not found: {worktree_path}",
@@ -123,6 +124,7 @@ def execute_codex_experiment(
     except Exception as e:
         return CodexResult(
             success=False,
+            mode=CodexMode.WAA,
             experiment_id=experiment_id,
             execution_time=0.0,
             error=f"Failed to read task markdown: {e}",
@@ -184,6 +186,7 @@ Please execute the experiment exactly as described above. Ensure you:
             logger.warning(f"Codex returned non-zero exit code: {proc.returncode}")
             return CodexResult(
                 success=False,
+                mode=CodexMode.WAA,
                 experiment_id=experiment_id,
                 execution_time=execution_time,
                 raw_output=raw_output,
@@ -198,6 +201,7 @@ Please execute the experiment exactly as described above. Ensure you:
 
         return CodexResult(
             success=False,
+            mode=CodexMode.WAA,
             experiment_id=experiment_id,
             execution_time=execution_time,
             error=f"Execution timed out after {timeout}s",
@@ -210,6 +214,7 @@ Please execute the experiment exactly as described above. Ensure you:
 
         return CodexResult(
             success=False,
+            mode=CodexMode.WAA,
             experiment_id=experiment_id,
             execution_time=execution_time,
             error="Codex CLI not found. Please install it first.",
@@ -222,6 +227,7 @@ Please execute the experiment exactly as described above. Ensure you:
 
         return CodexResult(
             success=False,
+            mode=CodexMode.WAA,
             experiment_id=experiment_id,
             execution_time=execution_time,
             error=f"Unexpected error: {e}",
@@ -264,6 +270,7 @@ def _parse_experiment_results(
         logger.warning(f"DONE file not found: {done_file}")
         return CodexResult(
             success=False,
+            mode=CodexMode.WAA,
             experiment_id=experiment_id,
             execution_time=execution_time,
             raw_output=raw_output,
@@ -277,6 +284,7 @@ def _parse_experiment_results(
         logger.error(f"Result file not found: {result_file}")
         return CodexResult(
             success=False,
+            mode=CodexMode.WAA,
             experiment_id=experiment_id,
             execution_time=execution_time,
             raw_output=raw_output,
@@ -295,6 +303,7 @@ def _parse_experiment_results(
             logger.error("Result file missing 'score' field")
             return CodexResult(
                 success=False,
+                mode=CodexMode.WAA,
                 experiment_id=experiment_id,
                 execution_time=execution_time,
                 raw_output=raw_output,
@@ -312,6 +321,7 @@ def _parse_experiment_results(
 
         return CodexResult(
             success=True,
+            mode=CodexMode.WAA,
             experiment_id=experiment_id,
             execution_time=execution_time,
             raw_output=raw_output,
@@ -323,6 +333,7 @@ def _parse_experiment_results(
         logger.error(f"Failed to parse result JSON: {e}")
         return CodexResult(
             success=False,
+            mode=CodexMode.WAA,
             experiment_id=experiment_id,
             execution_time=execution_time,
             raw_output=raw_output,
@@ -335,6 +346,7 @@ def _parse_experiment_results(
         logger.error(f"Unexpected error parsing results: {e}", exc_info=True)
         return CodexResult(
             success=False,
+            mode=CodexMode.WAA,
             experiment_id=experiment_id,
             execution_time=execution_time,
             raw_output=raw_output,

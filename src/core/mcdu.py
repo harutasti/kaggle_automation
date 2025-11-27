@@ -15,8 +15,14 @@ from ..utils.user_interaction import UserConfirmation
 from ..data_models import CompetitionInfo, ExperimentHypothesis, ExperimentResult, AnalysisResult
 
 class MasterControllerDecisionUnit(BaseComponent):
-    def __init__(self, config_path: str):
-        self.config = self._load_config(config_path)
+    def __init__(self, config: dict):
+        """
+        Initialize the Master Controller Decision Unit.
+
+        Args:
+            config: Configuration dictionary (already loaded and enriched by main.py)
+        """
+        self.config = config
         super().__init__(self.config)  # Initialize BaseComponent
 
         # Initialize user confirmation handler
@@ -50,23 +56,6 @@ class MasterControllerDecisionUnit(BaseComponent):
         self.no_improvement_threshold = stop_config.get("no_improvement_iterations", 3)
 
 
-    def _load_config(self, config_path: str) -> dict:
-        """Load configuration file."""
-        try:
-            with open(config_path, 'r', encoding='utf-8') as f:
-                config = json.load(f)
-            print(f"Configuration loaded from {config_path}")  # Print since logger not yet initialized
-            return config
-        except FileNotFoundError:
-            print(f"Error: Configuration file not found at {config_path}")
-            raise
-        except json.JSONDecodeError:
-            print(f"Error: Could not decode JSON from {config_path}")
-            raise
-        except Exception as e:
-            print(f"Error loading configuration: {e}")
-            raise
-
     def run_main_loop(self):
         """Main execution loop."""
         self._log_start("run_main_loop")
@@ -92,6 +81,12 @@ class MasterControllerDecisionUnit(BaseComponent):
              self.logger.warning("Failed to download/verify data files. Continuing, but WAA might fail.")
              self.user_confirm.show_warning("Failed to download/verify some data files")
              # Could decide to stop here
+
+        # Pass dataset analysis from KIM to KSE (avoids duplicate analysis)
+        dataset_placeholders = self.kim.get_dataset_analysis_placeholders()
+        if dataset_placeholders:
+            self.kse.set_dataset_analysis(dataset_placeholders)
+            self.logger.info("Passed dataset analysis from KIM to KSE")
 
         # Copy kaggle_data to hypotheses/ for KSE access
         experiment_run_dir = self.config.get("experiment_run_dir", "./experiments")

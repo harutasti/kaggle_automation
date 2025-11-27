@@ -49,7 +49,23 @@ class KnowledgeStrategyEngine(BaseComponent):
 
         # Number of WAAs per iteration (for GPU allocation calculations)
         self.wca_per_iteration = config.get("wca_per_iteration", 3)
-        
+
+    def set_dataset_analysis(self, analysis: Optional[Dict[str, Any]]) -> None:
+        """
+        Set the dataset analysis from an external source (e.g., KIM).
+
+        This allows reusing the analysis that KIM already performed,
+        avoiding duplicate work and ensuring consistency.
+
+        Args:
+            analysis: Dataset analysis dictionary from KIM.get_dataset_analysis()
+        """
+        if analysis:
+            self.dataset_analysis = analysis
+            self.logger.info("Dataset analysis received from KIM")
+        else:
+            self.logger.debug("No dataset analysis provided, will analyze on demand")
+
     def _get_system_specs(self) -> Dict[str, Any]:
         """Get system specifications, caching the result."""
         if self.system_specs is None:
@@ -601,10 +617,11 @@ Based on discussion analysis, here are relevant insights for this strategy:
         gpu_section = self._get_gpu_instructions_section(exp_id)
         task_content = self._generate_task_content(exp_id, iteration, strategy, params, comp_info, hypothesis_data)
 
-        # Fill template placeholders
+        # Fill template placeholders (including exp_id for status management instructions)
         return template.format(
             gpu_allocation_section=gpu_section,
-            task_content=task_content
+            task_content=task_content,
+            exp_id=exp_id
         )
 
     def _generate_task_markdown(self, exp_id: str, iteration: int, strategy: str, params: dict, comp_info: CompetitionInfo) -> str:
@@ -616,10 +633,11 @@ Based on discussion analysis, here are relevant insights for this strategy:
         gpu_section = self._get_gpu_instructions_section(exp_id)
         task_content = self._generate_task_content(exp_id, iteration, strategy, params, comp_info)
 
-        # Fill template placeholders
+        # Fill template placeholders (including exp_id for status management instructions)
         return template.format(
             gpu_allocation_section=gpu_section,
-            task_content=task_content
+            task_content=task_content,
+            exp_id=exp_id
         )
 
     def _get_gpu_instructions_section(self, exp_id: str, total_waas: Optional[int] = None) -> str:

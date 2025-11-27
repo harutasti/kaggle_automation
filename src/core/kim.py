@@ -31,6 +31,7 @@ class KaggleInterfaceManager(BaseComponent):
         self.crawler_output_dir = "kaggle_competitions"
         self.max_discussions = config.get("max_discussions", 20)
         self.dataset_analysis = None  # Will store dataset analysis results
+        self._dataset_analyzer = None  # Will store DatasetAnalyzer instance for placeholder generation
         self.analyze_dataset = config.get("analyze_dataset", True)  # Enable dataset analysis by default
 
     def _authenticate_kaggle(self):
@@ -249,11 +250,11 @@ class KaggleInterfaceManager(BaseComponent):
                     self.logger.warning("No data directory found for analysis")
                     return None
 
-            # Initialize dataset analyzer
-            analyzer = DatasetAnalyzer(self.competition_name, data_dir)
+            # Initialize dataset analyzer and store for later use
+            self._dataset_analyzer = DatasetAnalyzer(self.competition_name, data_dir)
 
             # Analyze the dataset
-            self.dataset_analysis = analyzer.analyze_competition_data()
+            self.dataset_analysis = self._dataset_analyzer.analyze_competition_data()
 
             # Log key statistics
             if self.dataset_analysis:
@@ -284,6 +285,28 @@ class KaggleInterfaceManager(BaseComponent):
             # Try to analyze now if not done yet
             self._analyze_competition_dataset()
         return self.dataset_analysis
+
+    def get_dataset_analysis_placeholders(self) -> Optional[Dict[str, Any]]:
+        """
+        Get dataset analysis formatted as prompt placeholders for KSE.
+
+        Returns:
+            Dictionary with keys matching KSE prompt placeholders, or None if analysis unavailable
+        """
+        # Ensure analysis has been performed
+        if self._dataset_analyzer is None:
+            if self.analyze_dataset:
+                self._analyze_competition_dataset()
+
+        # Return placeholders if analyzer is available
+        if self._dataset_analyzer is not None:
+            try:
+                return self._dataset_analyzer.get_prompt_placeholders()
+            except Exception as e:
+                self.logger.warning(f"Failed to get dataset placeholders: {e}")
+                return None
+
+        return None
 
     def submit_predictions(self, file_path: str, message: str) -> bool:
         """Submit predictions to Kaggle."""
