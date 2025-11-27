@@ -46,6 +46,9 @@ class ExperimentOrchestrator(BaseComponent):
         # Track resource monitors for RUNNING experiments
         self._resource_monitors: Dict[str, ResourceMonitor] = {}
 
+        # Track resumed processes for session continuation
+        self._resumed_processes: Dict[str, Tuple[subprocess.Popen, str]] = {}
+
         # Initialize GPU allocator for parallel WAA resource management
         self.gpu_allocator = GPUAllocator(config)
         self.logger.info(f"GPU allocator initialized")
@@ -163,15 +166,21 @@ class ExperimentOrchestrator(BaseComponent):
                         timeout=300  # 5 minutes timeout
                     )
                     if result.returncode != 0:
-                        self.logger.warning(f"uv sync failed: {result.stderr}")
+                        self.logger.error(f"uv sync failed for {exp_id}: {result.stderr}")
+                        raise RuntimeError(f"uv sync failed: {result.stderr}")
                     else:
                         self.logger.info(f"uv sync completed in {worktree_path}")
                 except subprocess.TimeoutExpired:
-                    self.logger.warning(f"uv sync timed out in {worktree_path}")
+                    self.logger.error(f"uv sync timed out for {exp_id} in {worktree_path}")
+                    raise RuntimeError(f"uv sync timed out after 300 seconds")
                 except FileNotFoundError:
                     self.logger.error("uv command not found. Is uv installed?")
+                    raise RuntimeError("uv command not found - please install uv")
+                except RuntimeError:
+                    raise  # Re-raise RuntimeError from above
                 except Exception as e:
-                    self.logger.warning(f"Failed to run uv sync: {e}")
+                    self.logger.error(f"Failed to run uv sync for {exp_id}: {e}")
+                    raise RuntimeError(f"uv sync failed: {e}")
 
                 # Create initial experiment-status.yaml for session tracking
                 try:
@@ -424,10 +433,6 @@ Please execute the experiment exactly as described above. Ensure you:
     def _trigger_resume(self, exp_id: str, process: subprocess.Popen, worktree_path: str) -> bool:
         """Trigger Codex resume using `codex resume --last`."""
         self.logger.info(f"Triggering session resume for {exp_id}")
-
-        # Track resumed processes
-        if not hasattr(self, '_resumed_processes'):
-            self._resumed_processes = {}
 
         # Read training log for context
         training_log_tail = ""

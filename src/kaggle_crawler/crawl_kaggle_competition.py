@@ -181,17 +181,19 @@ def download_kaggle_competition_data(competition_id: str, output_dir: str) -> bo
         print(f"[download] downloading competition files for {competition_id}")
         api.competition_download_files(competition_id, path=str(data_dir), force=True)
 
-        # Unzip all .zip files
-        unzip_cmd = (
-            f'find "{data_dir}" -maxdepth 1 -name "*.zip" -exec unzip -o {{}} -d "{data_dir}" \\;'
-        )
-        print(f"[download] {unzip_cmd}")
-        subprocess.run(unzip_cmd, shell=True, check=True)
+        # Unzip all .zip files (using glob to avoid shell injection)
+        zip_files = list(data_dir.glob("*.zip"))
+        for zip_file in zip_files:
+            print(f"[download] unzipping {zip_file}")
+            subprocess.run(
+                ['unzip', '-o', str(zip_file), '-d', str(data_dir)],
+                check=True
+            )
 
         # Remove the .zip files after extraction
-        cleanup_cmd = f'find "{data_dir}" -maxdepth 1 -name "*.zip" -delete'
-        print(f"[download] {cleanup_cmd}")
-        subprocess.run(cleanup_cmd, shell=True, check=True)
+        for zip_file in zip_files:
+            print(f"[download] removing {zip_file}")
+            zip_file.unlink()
 
         print("[download] data download, extraction, and cleanup complete")
         return True

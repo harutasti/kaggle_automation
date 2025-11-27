@@ -106,8 +106,8 @@ class KaggleInterfaceManager(BaseComponent):
                         self.logger.warning("Failed to parse crawler data, will try other methods")
             
             # Fall back to API or simulation
-            if self.simulation_mode or not self.api:
-                # Dummy data for simulation mode
+            if self.simulation_mode or self.api is None:
+                # Dummy data for simulation mode or when API auth failed
                 dummy_deadline = datetime.datetime.now() + datetime.timedelta(days=30)
                 info = CompetitionInfo(
                     name=self.competition_name,
@@ -118,7 +118,7 @@ class KaggleInterfaceManager(BaseComponent):
                 )
                 self.logger.info(f"Generated dummy competition info for: {self.competition_name}")
             else:
-                # Fetch info from real Kaggle API
+                # Fetch info from real Kaggle API (api is guaranteed non-None here)
                 comp = self.api.competition_view(self.competition_name)
                 
                 # Parse deadline with flexible formats
@@ -188,8 +188,8 @@ class KaggleInterfaceManager(BaseComponent):
                     return True
             
             # Fall back to API or simulation
-            if self.simulation_mode or not self.api:
-                # Create dummy files for simulation mode
+            if self.simulation_mode or self.api is None:
+                # Create dummy files for simulation mode or when API auth failed
                 for filename in competition_info.data_files:
                     dummy_file_path = os.path.join(self.download_dir, filename)
                     if not os.path.exists(dummy_file_path):
@@ -290,11 +290,11 @@ class KaggleInterfaceManager(BaseComponent):
         method_name = "submit_predictions"
         self._log_start(method_name, file_path=file_path, message=message)
         
-        if self.simulation_mode or not self.api:
-            self.logger.info("Submission skipped (simulation mode).")
+        if self.simulation_mode or self.api is None:
+            self.logger.info("Submission skipped (simulation mode or API unavailable).")
             self._log_end(method_name, result=True)
             return True
-        
+
         try:
             # Confirm file exists
             if not os.path.exists(file_path):
@@ -336,9 +336,9 @@ class KaggleInterfaceManager(BaseComponent):
         method_name = "get_submission_score"
         self._log_start(method_name, wait_timeout=wait_timeout)
 
-        if self.simulation_mode or not self.api:
-            # Return simulated score for testing
-            self.logger.info("Returning simulated submission score")
+        if self.simulation_mode or self.api is None:
+            # Return simulated score for testing or when API unavailable
+            self.logger.info("Returning simulated submission score (simulation mode or API unavailable)")
             result = {"score": 0.85, "status": "complete", "submission_id": "simulated"}
             self._log_end(method_name, result=result)
             return result
