@@ -438,6 +438,128 @@ class KnowledgeStrategyEngine(BaseComponent):
         self._log_end(method_name, result=f"Generated {len(hypotheses)} hypotheses")
         return hypotheses
 
+    def _load_waa_template(self) -> str:
+        """Load the unified WAA task template."""
+        template_path = os.path.join(self.prompts_dir, "WAA", "waa_task_template.md")
+        if os.path.exists(template_path):
+            with open(template_path, 'r') as f:
+                return f.read()
+        else:
+            raise FileNotFoundError(f"WAA template not found: {template_path}")
+
+    def _generate_task_content(self, exp_id: str, iteration: int, strategy: str,
+                               params: dict, comp_info: CompetitionInfo,
+                               hypothesis_data: Optional[Dict[str, Any]] = None) -> str:
+        """
+        Generate the task-specific content section for WAA prompts.
+
+        Args:
+            exp_id: Experiment identifier
+            iteration: Current iteration number
+            strategy: Strategy name
+            params: Model/experiment parameters
+            comp_info: Competition information
+            hypothesis_data: Optional hypothesis data from Codex (if using Codex-generated hypotheses)
+
+        Returns:
+            Task-specific markdown content (without UV/GPU/status sections)
+        """
+        if hypothesis_data:
+            # Generate task content from Codex-generated hypothesis
+            task_md = f"# Experiment Task: {exp_id}\n\n"
+            task_md += f"## Competition: {comp_info.name}\n"
+            task_md += f"## Iteration: {iteration}\n"
+            task_md += f"## Strategy: {strategy}\n\n"
+
+            # Add hypothesis details from Codex
+            if hypothesis_data.get("description"):
+                task_md += f"### Hypothesis\n{hypothesis_data['description']}\n\n"
+
+            if hypothesis_data.get("approach"):
+                task_md += f"### Approach\n{hypothesis_data['approach']}\n\n"
+
+            task_md += f"### Parameters\n```json\n{json.dumps(params, indent=2)}\n```\n\n"
+
+            # Implementation steps
+            task_md += f"### Implementation Steps\n"
+            if hypothesis_data.get("steps"):
+                for i, step in enumerate(hypothesis_data["steps"], 1):
+                    task_md += f"{i}. {step}\n"
+            else:
+                # Default steps
+                task_md += f"1. Load data from `{comp_info.data_files}`\n"
+                task_md += f"2. Implement {strategy} with specified parameters\n"
+                task_md += f"3. Train model using cross-validation\n"
+                task_md += f"4. Generate predictions on test set\n"
+                task_md += f"5. Save results to `result_{exp_id}.json`\n"
+
+            task_md += f"\n### Expected Output\n"
+            task_md += f"- Model file: `model_{exp_id}.pkl`\n"
+            task_md += f"- Predictions: `submission_{exp_id}.csv`\n"
+            task_md += f"- Results JSON: `result_{exp_id}.json` containing:\n"
+            task_md += f"  - validation_score\n"
+            task_md += f"  - feature_importance (if applicable)\n"
+            task_md += f"  - runtime_seconds\n"
+            task_md += f"  - parameters_used\n"
+
+            task_md += f"\n### Success Criteria\n"
+            task_md += f"- Model trains without errors\n"
+            task_md += f"- Validation score is computed\n"
+            task_md += f"- Submission file is in correct format\n"
+            task_md += f"- Results are saved to JSON\n"
+            task_md += f"- Completion marker created: `DONE_{exp_id}`\n"
+
+            return task_md
+
+        else:
+            # Generate task content from programmatic generation
+            # Find relevant discussion insights for this strategy
+            relevant_insights = []
+            if self.discussion_strategies:
+                for disc_strategy in self.discussion_strategies:
+                    if any(keyword in strategy.lower() for keyword in disc_strategy['strategy_name'].lower().split()):
+                        relevant_insights.append(disc_strategy['description'])
+
+            task_md = f"""# Experiment Task: {exp_id}
+
+**Iteration:** {iteration}
+**Strategy:** {strategy}
+**Competition:** {comp_info.name} ({comp_info.evaluation_metric})
+
+## Parameters
+```json
+{json.dumps(params, indent=2)}
+```
+
+{f'''## Community Insights
+Based on discussion analysis, here are relevant insights for this strategy:
+{chr(10).join(f"- {{insight}}" for insight in relevant_insights[:3])}
+''' if relevant_insights else ''}
+
+## Instructions for AI Agent (WAA)
+
+1.  **Understand the Goal:** The primary goal is to train a model using the '{strategy}' approach with the specified parameters and evaluate it using the '{comp_info.evaluation_metric}' metric.
+2.  **Load Data:** Load the necessary data files: {', '.join(comp_info.data_files)}. Assume they are available in the standard data directory relative to the worktree root.
+3.  **Preprocessing/Feature Engineering:** Apply preprocessing steps suitable for the '{strategy}'. If the strategy includes 'FeatureEng', implement the corresponding feature engineering logic. Use features specified in parameters if available (e.g., `feature_set`).
+4.  **Model Training:**
+    *   Instantiate the model based on the '{strategy}' (e.g., LightGBM, RandomForest, a simple Keras/PyTorch NN).
+    *   Use the provided `parameters` for model initialization and training (e.g., learning rate, number of estimators, epochs, layers).
+    *   Train the model on the training data. Implement cross-validation if appropriate for the strategy.
+5.  **Prediction & Evaluation:**
+    *   Generate predictions on a validation set (or via CV).
+    *   Calculate the score using the '{comp_info.evaluation_metric}' metric.
+    *   Generate predictions on the test set.
+6.  **Output Generation:**
+    *   Save the trained model (optional, if needed later).
+    *   Save the validation/CV score to `result_{exp_id}.json` in the worktree root (format: `{{"score": <score_value>}}`).
+    *   Save the test predictions to `submission_{exp_id}.csv` in the format required by the competition.
+    *   Log key steps and results to `waa_{exp_id}.log`.
+7.  **Final Step:** Create a file named `DONE_{exp_id}` in the worktree root to signal completion.
+
+**Important:** Ensure all file paths for output are relative to the root of this Git worktree. Use the provided `experiment_id` (`{exp_id}`) in filenames.
+"""
+            return task_md.strip()
+
     def _get_dummy_params(self, strategy: str, previous_results: Optional[List[ExperimentResult]] = None) -> dict:
         """Generate placeholder parameters based on strategy."""
         if "GBM" in strategy or "LightGBM" in strategy:
@@ -471,175 +593,34 @@ class KnowledgeStrategyEngine(BaseComponent):
     def _generate_task_markdown_from_hypothesis(self, exp_id: str, iteration: int, strategy: str,
                                                params: dict, comp_info: CompetitionInfo,
                                                hypothesis_data: Dict[str, Any]) -> str:
-        """Generate task markdown from Codex-generated hypothesis."""
-        task_md = f"# Experiment Task: {exp_id}\n\n"
-        task_md += f"## Competition: {comp_info.name}\n"
-        task_md += f"## Iteration: {iteration}\n"
-        task_md += f"## Strategy: {strategy}\n\n"
+        """Generate task markdown from Codex-generated hypothesis using unified template."""
+        # Load unified template
+        template = self._load_waa_template()
 
-        # Add hypothesis details from Codex
-        if hypothesis_data.get("description"):
-            task_md += f"### Hypothesis\n{hypothesis_data['description']}\n\n"
+        # Generate dynamic sections
+        gpu_section = self._get_gpu_instructions_section(exp_id)
+        task_content = self._generate_task_content(exp_id, iteration, strategy, params, comp_info, hypothesis_data)
 
-        if hypothesis_data.get("approach"):
-            task_md += f"### Approach\n{hypothesis_data['approach']}\n\n"
-
-        task_md += f"### Parameters\n```json\n{json.dumps(params, indent=2)}\n```\n\n"
-
-        # Implementation steps
-        task_md += f"### Implementation Steps\n"
-        if hypothesis_data.get("steps"):
-            for i, step in enumerate(hypothesis_data["steps"], 1):
-                task_md += f"{i}. {step}\n"
-        else:
-            # Default steps
-            task_md += f"1. Load data from `{comp_info.data_files}`\n"
-            task_md += f"2. Implement {strategy} with specified parameters\n"
-            task_md += f"3. Train model using cross-validation\n"
-            task_md += f"4. Generate predictions on test set\n"
-            task_md += f"5. Save results to `result_{exp_id}.json`\n"
-
-        task_md += f"\n### Expected Output\n"
-        task_md += f"- Model file: `model_{exp_id}.pkl`\n"
-        task_md += f"- Predictions: `submission_{exp_id}.csv`\n"
-        task_md += f"- Results JSON: `result_{exp_id}.json` containing:\n"
-        task_md += f"  - validation_score\n"
-        task_md += f"  - feature_importance (if applicable)\n"
-        task_md += f"  - runtime_seconds\n"
-        task_md += f"  - parameters_used\n"
-
-        task_md += f"\n### Success Criteria\n"
-        task_md += f"- Model trains without errors\n"
-        task_md += f"- Validation score is computed\n"
-        task_md += f"- Submission file is in correct format\n"
-        task_md += f"- Results are saved to JSON\n"
-        task_md += f"- Completion marker created: `DONE_{exp_id}`\n"
-
-        # Inject uv requirements, GPU allocation, and status instructions at the beginning
-        uv_requirements = self._get_uv_requirements_section()
-        gpu_instructions = self._get_gpu_instructions_section(exp_id)
-        status_instructions = self._get_status_instructions_section()
-        return uv_requirements + "\n\n" + gpu_instructions + "\n\n" + status_instructions + "\n\n" + task_md
+        # Fill template placeholders
+        return template.format(
+            gpu_allocation_section=gpu_section,
+            task_content=task_content
+        )
 
     def _generate_task_markdown(self, exp_id: str, iteration: int, strategy: str, params: dict, comp_info: CompetitionInfo) -> str:
-        """Generate task markdown for the WAA."""
-        
-        # Find relevant discussion insights for this strategy
-        relevant_insights = []
-        if self.discussion_strategies:
-            for disc_strategy in self.discussion_strategies:
-                if any(keyword in strategy.lower() for keyword in disc_strategy['strategy_name'].lower().split()):
-                    relevant_insights.append(disc_strategy['description'])
-        
-        markdown = f"""
-# Experiment Task: {exp_id}
+        """Generate task markdown for the WAA using unified template."""
+        # Load unified template
+        template = self._load_waa_template()
 
-**Iteration:** {iteration}
-**Strategy:** {strategy}
-**Competition:** {comp_info.name} ({comp_info.evaluation_metric})
+        # Generate dynamic sections
+        gpu_section = self._get_gpu_instructions_section(exp_id)
+        task_content = self._generate_task_content(exp_id, iteration, strategy, params, comp_info)
 
-## Parameters
-```json
-{json.dumps(params, indent=2)}
-```
-
-{f'''## Community Insights
-Based on discussion analysis, here are relevant insights for this strategy:
-{chr(10).join(f"- {insight}" for insight in relevant_insights[:3])}
-''' if relevant_insights else ''}
-
-## Instructions for AI Agent (WAA)
-
-1.  **Understand the Goal:** The primary goal is to train a model using the '{strategy}' approach with the specified parameters and evaluate it using the '{comp_info.evaluation_metric}' metric.
-2.  **Load Data:** Load the necessary data files: {', '.join(comp_info.data_files)}. Assume they are available in the standard data directory relative to the worktree root.
-3.  **Preprocessing/Feature Engineering:** Apply preprocessing steps suitable for the '{strategy}'. If the strategy includes 'FeatureEng', implement the corresponding feature engineering logic. Use features specified in parameters if available (e.g., `feature_set`).
-4.  **Model Training:**
-    *   Instantiate the model based on the '{strategy}' (e.g., LightGBM, RandomForest, a simple Keras/PyTorch NN).
-    *   Use the provided `parameters` for model initialization and training (e.g., learning rate, number of estimators, epochs, layers).
-    *   Train the model on the training data. Implement cross-validation if appropriate for the strategy.
-5.  **Prediction & Evaluation:**
-    *   Generate predictions on a validation set (or via CV).
-    *   Calculate the score using the '{comp_info.evaluation_metric}' metric.
-    *   Generate predictions on the test set.
-6.  **Output Generation:**
-    *   Save the trained model (optional, if needed later).
-    *   Save the validation/CV score to `result_{exp_id}.json` in the worktree root (format: `{{"score": <score_value>}}`).
-    *   Save the test predictions to `submission_{exp_id}.csv` in the format required by the competition.
-    *   Log key steps and results to `waa_{exp_id}.log`.
-7.  **Final Step:** Create a file named `DONE_{exp_id}` in the worktree root to signal completion.
-
-**Important:** Ensure all file paths for output are relative to the root of this Git worktree. Use the provided `experiment_id` (`{exp_id}`) in filenames.
-"""
-        # Inject uv requirements, GPU allocation, and status instructions at the beginning
-        uv_requirements = self._get_uv_requirements_section()
-        gpu_instructions = self._get_gpu_instructions_section(exp_id)
-        status_instructions = self._get_status_instructions_section()
-        return uv_requirements + "\n\n" + gpu_instructions + "\n\n" + status_instructions + "\n\n" + markdown.strip()
-
-    def _get_uv_requirements_section(self) -> str:
-        """Return strict uv usage requirements for WAA prompts."""
-        return '''## CRITICAL: Python Environment Requirements
-
-**YOU MUST FOLLOW THESE INSTRUCTIONS EXACTLY:**
-
-1. **Use the current virtual environment** - DO NOT create a new virtual environment
-2. **Install packages with `uv add <package-name>`** - NEVER use `pip install`
-3. **Run scripts with `uv run xxx.py`** - NEVER use `python xxx.py`
-
-Examples:
-- To install a package: `uv add torch`
-- To run a script: `uv run train.py`
-- To run with arguments: `uv run train.py --epochs 10`
-
-**VIOLATION OF THESE RULES WILL CAUSE EXPERIMENT FAILURE.**'''
-
-    def _get_status_instructions_section(self) -> str:
-        """Return status file management instructions for WAA prompts."""
-        # Try to load from template file
-        template_path = os.path.join(self.prompts_dir, "WAA", "status_instructions.md")
-        if os.path.exists(template_path):
-            try:
-                with open(template_path, 'r') as f:
-                    return f.read()
-            except Exception as e:
-                self.logger.warning(f"Failed to load status instructions template: {e}")
-
-        # Fallback to inline instructions
-        return self._get_inline_status_instructions()
-
-    def _get_inline_status_instructions(self) -> str:
-        """Fallback inline status instructions when template not available."""
-        return '''## CRITICAL: Experiment Status Management
-
-You MUST maintain `experiment-status.yaml` to communicate your progress.
-
-### Status Values
-- **IDLE**: Default, short operations (<10 min). Continue working normally.
-- **RUNNING**: Long operations (>10 min). Set this, start background training, **EXIT IMMEDIATELY**.
-- **COMPLETE**: All outputs ready. Set this, **EXIT IMMEDIATELY**.
-- **ERROR**: Unrecoverable error. Explain problem, **EXIT IMMEDIATELY**.
-
-### Before Long Training (>10 minutes)
-1. Update status to RUNNING:
-```bash
-cat >> experiment-status.yaml << 'EOF'
-  - timestamp: "$(date -Iseconds)"
-    status: RUNNING
-    message: "Starting model training"
-EOF
-```
-2. Start training in background: `nohup uv run train.py > training.log 2>&1 &`
-3. **EXIT the session immediately** - do NOT wait for training
-
-The system will automatically resume when training completes (detects low GPU/CPU usage and no file writes).
-
-### When Work is Complete
-1. Create all output files (result_{exp_id}.json, submission_{exp_id}.csv)
-2. Update status to COMPLETE
-3. Create DONE_{exp_id} marker
-4. **EXIT immediately**
-
-**CRITICAL**: After setting RUNNING or COMPLETE, you MUST exit the session!'''
+        # Fill template placeholders
+        return template.format(
+            gpu_allocation_section=gpu_section,
+            task_content=task_content
+        )
 
     def _get_gpu_instructions_section(self, exp_id: str, total_waas: Optional[int] = None) -> str:
         """
