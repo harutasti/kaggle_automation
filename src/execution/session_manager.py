@@ -6,6 +6,7 @@ for experiments that outlast Codex CLI sessions.
 """
 
 import os
+import time
 import logging
 from enum import Enum
 from pathlib import Path
@@ -17,6 +18,11 @@ try:
     import yaml
 except ImportError:
     yaml = None  # type: ignore
+
+
+# Constants for retry logic
+MAX_STATUS_READ_RETRIES = 3
+RETRY_BACKOFF_SECONDS = 0.5
 
 
 class SessionStatus(Enum):
@@ -373,14 +379,65 @@ class SessionManager:
         """Check if a status is terminal (COMPLETE or ERROR)."""
         return status in (SessionStatus.COMPLETE, SessionStatus.ERROR)
 
-    def _read_yaml(self, path: Path) -> Dict[str, Any]:
-        """Read YAML file with fallback for missing PyYAML."""
-        if yaml is not None:
-            with open(path, 'r') as f:
-                return yaml.safe_load(f) or {}
-        else:
-            # Simple fallback parser for our specific format
-            return self._simple_yaml_parse(path)
+    def _read_yaml(self, path: Path, max_retries: int = MAX_STATUS_READ_RETRIES) -> Dict[str, Any]:
+        """Read YAML file with fallback for missing PyYAML and retry logic.
+
+        Args:
+            path: Path to the YAML file
+            max_retries: Maximum number of retries for corrupted/incomplete files
+
+        Returns:
+            Parsed YAML content or empty dict on failure
+        """
+        last_error = None
+
+        for attempt in range(max_retries):
+            try:
+                if yaml is not None:
+                    with open(path, 'r') as f:
+                        return yaml.safe_load(f) or {}
+                else:
+                    # Simple fallback parser for our specific format
+                    return self._simple_yaml_parse(path)
+            except FileNotFoundError:
+                # File doesn't exist - don't retry, this is expected
+                return {}
+            except PermissionError as e:
+                # Permission issues - don't retry
+                self.logger.error(f"Permission denied reading {path}: {e}")
+                return {}
+            except Exception as e:
+                # Parse errors or other issues - retry with backoff
+                error_name = type(e).__name__
+                is_parse_error = (
+                    (yaml is not None and isinstance(e, yaml.YAMLError)) or
+                    'parse' in error_name.lower() or
+                    'scan' in error_name.lower() or
+                    'yaml' in error_name.lower()
+                )
+
+                if is_parse_error and attempt < max_retries - 1:
+                    last_error = e
+                    wait_time = RETRY_BACKOFF_SECONDS * (2 ** attempt)
+                    self.logger.warning(
+                        f"Failed to parse YAML {path} (attempt {attempt + 1}/{max_retries}): {e}. "
+                        f"Retrying in {wait_time}s..."
+                    )
+                    time.sleep(wait_time)
+                elif is_parse_error:
+                    last_error = e
+                    # Will fall through to "all retries exhausted" message
+                else:
+                    # Non-parse errors - don't retry
+                    self.logger.error(f"Error reading {path}: {e}")
+                    return {}
+
+        # All retries exhausted
+        self.logger.error(
+            f"Failed to parse YAML {path} after {max_retries} attempts. "
+            f"Last error: {last_error}. File may be corrupted."
+        )
+        return {}
 
     def _write_yaml(self, path: Path, content: Dict[str, Any]) -> None:
         """Write YAML file with fallback for missing PyYAML."""

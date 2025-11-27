@@ -44,6 +44,7 @@ class MasterControllerDecisionUnit(BaseComponent):
         self.wca_per_iteration = self.config.get("wca_per_iteration", 3)
         self.competition_info: Optional[CompetitionInfo] = None
         self.all_results: Dict[int, List[ExperimentResult]] = {}  # {iteration: [results]}
+        self.all_hypotheses: Dict[str, ExperimentHypothesis] = {}  # {exp_id: hypothesis} - persists across iterations
         self.best_score_overall: Optional[float] = None
         self.best_experiment_id_overall: Optional[str] = None
         self.iterations_without_improvement = 0
@@ -152,7 +153,9 @@ class MasterControllerDecisionUnit(BaseComponent):
             self.user_confirm.show_success(f"Launched {len(launched_ids)}/{total_requested} experiments")
 
             running_experiments = set(launched_ids)
-            hypotheses_map = {h.experiment_id: h for h in hypotheses}  # Map ID -> hypothesis
+            # Store hypotheses in persistent map (survives across iterations for resumed experiments)
+            for h in hypotheses:
+                self.all_hypotheses[h.experiment_id] = h
 
             # 2c. Wait for completion & collect results (DO NOT cleanup yet)
             iteration_results = []
@@ -166,9 +169,10 @@ class MasterControllerDecisionUnit(BaseComponent):
                      for exp_id in newly_completed:
                          worktree_path = self.eo.get_worktree_path(exp_id)
                          # Pass hypothesis directly to collect_result for proper metadata
-                         hypothesis = hypotheses_map.get(exp_id)
+                         # Use all_hypotheses which persists across iterations
+                         hypothesis = self.all_hypotheses.get(exp_id)
                          if not hypothesis:
-                             self.logger.warning(f"Hypothesis not found for {exp_id}, collecting with limited metadata")
+                             self.logger.warning(f"Hypothesis not found for {exp_id}, RAD will load from worktree metadata")
                          result = self.rad.collect_result(exp_id, worktree_path, hypothesis=hypothesis)
                          if result:
                              iteration_results.append(result)

@@ -4,6 +4,7 @@ import time
 import uuid
 import subprocess
 import multiprocessing
+import json
 from typing import List, Dict, Tuple, Optional
 import git # GitPython
 
@@ -199,6 +200,23 @@ class ExperimentOrchestrator(BaseComponent):
                     self.logger.info(f"Created experiment-status.yaml in {worktree_path}")
                 except Exception as e:
                     self.logger.warning(f"Failed to create status file: {e}")
+
+                # Save hypothesis metadata to worktree for resume context
+                # This ensures we can reconstruct hypothesis info even after session resume
+                try:
+                    hypothesis_metadata = {
+                        "experiment_id": hypothesis.experiment_id,
+                        "iteration": hypothesis.iteration,
+                        "strategy_name": hypothesis.strategy_name,
+                        "parameters": hypothesis.parameters,
+                        "task_markdown_path": hypothesis.task_markdown_path,
+                    }
+                    metadata_path = os.path.join(worktree_path, f"hypothesis_{exp_id}.json")
+                    with open(metadata_path, 'w', encoding='utf-8') as f:
+                        json.dump(hypothesis_metadata, f, indent=2)
+                    self.logger.debug(f"Saved hypothesis metadata to {metadata_path}")
+                except Exception as e:
+                    self.logger.warning(f"Failed to save hypothesis metadata: {e}")
 
                 # Calculate GPU allocation for this WAA
                 waa_index = GPUAllocator.parse_waa_index(exp_id)
@@ -407,12 +425,36 @@ Please execute the experiment exactly as described above. Ensure you:
                 still_active_processes[exp_id] = (process, worktree_path)
 
         # 4. Handle sessions needing resume
+        # Note: execute_codex_resume() is BLOCKING - it waits for the resumed session to complete
         for exp_id, process, worktree_path in sessions_needing_resume:
             resumed = self._trigger_resume(exp_id, process, worktree_path)
             if resumed:
-                # Resume started successfully, keep tracking with new process
-                if exp_id in self._resumed_processes:
-                    still_active_processes[exp_id] = self._resumed_processes[exp_id]
+                # Resume completed successfully (blocking call returned)
+                # Check if experiment actually completed by looking for DONE file or status
+                done_file_path = os.path.join(worktree_path, f"DONE_{exp_id}")
+                try:
+                    current_status = self.session_manager.read_current_status(worktree_path)
+                except Exception:
+                    current_status = None
+
+                if os.path.exists(done_file_path):
+                    # Experiment completed - add to completed_ids
+                    self.logger.info(f"Resume completed and experiment {exp_id} finished successfully")
+                    completed_ids.append(exp_id)
+                elif current_status and current_status.status == SessionStatus.COMPLETE:
+                    # Status shows complete - finalize
+                    self._finalize_completed_experiment(exp_id, process, worktree_path)
+                    completed_ids.append(exp_id)
+                elif current_status and current_status.status == SessionStatus.ERROR:
+                    # Resumed but ended in error
+                    self._handle_error_experiment(exp_id, process, worktree_path, current_status)
+                    completed_ids.append(exp_id)
+                else:
+                    # Resume succeeded but experiment not complete (rare - WAA may have set RUNNING again)
+                    # Keep in active processes for next check cycle
+                    self.logger.warning(f"Resume completed for {exp_id} but experiment not finished. Continuing to monitor.")
+                    still_active_processes[exp_id] = (process, worktree_path)
+
                 # Reset retry count on successful resume
                 self._resume_retry_count[exp_id] = 0
             else:

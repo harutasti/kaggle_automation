@@ -179,7 +179,7 @@ class KnowledgeStrategyEngine(BaseComponent):
                 params = self._get_dummy_params(strategy)
                 task_md_path = os.path.join(self.hypothesis_dir, f"{exp_id}_task.md")
 
-                task_markdown = self._generate_task_markdown(exp_id, 0, strategy, params, competition_info)
+                task_markdown = self._generate_task_markdown(exp_id, 0, strategy, params, competition_info, num_hypotheses)
                 write_markdown(task_markdown, task_md_path)
 
                 hypothesis = ExperimentHypothesis(
@@ -282,7 +282,7 @@ class KnowledgeStrategyEngine(BaseComponent):
 
                     # Generate task markdown from hypothesis
                     task_markdown = self._generate_task_markdown_from_hypothesis(
-                        exp_id, iteration, strategy, params, competition_info, hyp_data
+                        exp_id, iteration, strategy, params, competition_info, hyp_data, num_hypotheses
                     )
                     write_markdown(task_markdown, task_md_path)
 
@@ -314,7 +314,7 @@ class KnowledgeStrategyEngine(BaseComponent):
             params = self._get_dummy_params(strategy, previous_results)
             task_md_path = os.path.join(self.hypothesis_dir, f"{exp_id}_task.md")
 
-            task_markdown = self._generate_task_markdown(exp_id, iteration, strategy, params, competition_info)
+            task_markdown = self._generate_task_markdown(exp_id, iteration, strategy, params, competition_info, num_hypotheses)
             write_markdown(task_markdown, task_md_path)
 
             hypothesis = ExperimentHypothesis(
@@ -438,7 +438,7 @@ class KnowledgeStrategyEngine(BaseComponent):
                 params = self._get_dummy_params(strategy, previous_results)  # Could adjust params using past results
                 task_md_path = os.path.join(self.hypothesis_dir, f"{exp_id}_task.md")
 
-                task_markdown = self._generate_task_markdown(exp_id, current_iteration, strategy, params, competition_info)
+                task_markdown = self._generate_task_markdown(exp_id, current_iteration, strategy, params, competition_info, num_hypotheses)
                 write_markdown(task_markdown, task_md_path)
 
                 hypothesis = ExperimentHypothesis(
@@ -456,12 +456,28 @@ class KnowledgeStrategyEngine(BaseComponent):
 
     def _load_waa_template(self) -> str:
         """Load the unified WAA task template."""
+        # First try the configured prompts_dir (may be absolute or relative)
         template_path = os.path.join(self.prompts_dir, "WAA", "waa_task_template.md")
         if os.path.exists(template_path):
             with open(template_path, 'r') as f:
                 return f.read()
-        else:
-            raise FileNotFoundError(f"WAA template not found: {template_path}")
+
+        # Fallback: use absolute path relative to this source file
+        # This ensures the template is found regardless of working directory
+        base_dir = os.path.dirname(os.path.abspath(__file__))
+        project_root = os.path.dirname(os.path.dirname(base_dir))  # Go up from src/core/ to project root
+        absolute_template_path = os.path.join(project_root, "prompts", "WAA", "waa_task_template.md")
+
+        if os.path.exists(absolute_template_path):
+            self.logger.debug(f"Using absolute template path: {absolute_template_path}")
+            with open(absolute_template_path, 'r') as f:
+                return f.read()
+
+        raise FileNotFoundError(
+            f"WAA template not found at:\n"
+            f"  - {template_path}\n"
+            f"  - {absolute_template_path}"
+        )
 
     def _generate_task_content(self, exp_id: str, iteration: int, strategy: str,
                                params: dict, comp_info: CompetitionInfo,
@@ -608,13 +624,14 @@ Based on discussion analysis, here are relevant insights for this strategy:
 
     def _generate_task_markdown_from_hypothesis(self, exp_id: str, iteration: int, strategy: str,
                                                params: dict, comp_info: CompetitionInfo,
-                                               hypothesis_data: Dict[str, Any]) -> str:
+                                               hypothesis_data: Dict[str, Any],
+                                               total_waas: Optional[int] = None) -> str:
         """Generate task markdown from Codex-generated hypothesis using unified template."""
         # Load unified template
         template = self._load_waa_template()
 
         # Generate dynamic sections
-        gpu_section = self._get_gpu_instructions_section(exp_id)
+        gpu_section = self._get_gpu_instructions_section(exp_id, total_waas)
         task_content = self._generate_task_content(exp_id, iteration, strategy, params, comp_info, hypothesis_data)
 
         # Fill template placeholders (including exp_id for status management instructions)
@@ -624,13 +641,14 @@ Based on discussion analysis, here are relevant insights for this strategy:
             exp_id=exp_id
         )
 
-    def _generate_task_markdown(self, exp_id: str, iteration: int, strategy: str, params: dict, comp_info: CompetitionInfo) -> str:
+    def _generate_task_markdown(self, exp_id: str, iteration: int, strategy: str, params: dict,
+                                comp_info: CompetitionInfo, total_waas: Optional[int] = None) -> str:
         """Generate task markdown for the WAA using unified template."""
         # Load unified template
         template = self._load_waa_template()
 
         # Generate dynamic sections
-        gpu_section = self._get_gpu_instructions_section(exp_id)
+        gpu_section = self._get_gpu_instructions_section(exp_id, total_waas)
         task_content = self._generate_task_content(exp_id, iteration, strategy, params, comp_info)
 
         # Fill template placeholders (including exp_id for status management instructions)

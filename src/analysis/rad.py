@@ -186,14 +186,28 @@ class ResultAggregatorDatabase(BaseComponent):
             parameters = hypothesis.parameters
             self.logger.info(f"Using hypothesis metadata: iteration={iteration}, strategy={strategy_name}")
         else:
-            # Fallback: try to extract iteration from exp_id pattern (e.g., "iter0_exp1_abc123")
+            # Fallback 1: Try to load hypothesis metadata from worktree (saved by EO)
             iteration = -1
             strategy_name = "Unknown"
             parameters = {}
-            match = re.match(r'iter(\d+)_', exp_id)
-            if match:
-                iteration = int(match.group(1))
-                self.logger.info(f"Extracted iteration {iteration} from exp_id")
+            hypothesis_metadata_path = os.path.join(worktree_path, f"hypothesis_{exp_id}.json")
+            if os.path.exists(hypothesis_metadata_path):
+                try:
+                    with open(hypothesis_metadata_path, 'r', encoding='utf-8') as f:
+                        metadata = json.load(f)
+                    iteration = metadata.get("iteration", -1)
+                    strategy_name = metadata.get("strategy_name", "Unknown")
+                    parameters = metadata.get("parameters", {})
+                    self.logger.info(f"Loaded hypothesis metadata from worktree: iteration={iteration}, strategy={strategy_name}")
+                except Exception as e:
+                    self.logger.warning(f"Failed to load hypothesis metadata from {hypothesis_metadata_path}: {e}")
+
+            # Fallback 2: Try to extract iteration from exp_id pattern (e.g., "iter0_exp1_abc123")
+            if iteration == -1:
+                match = re.match(r'iter(\d+)_', exp_id)
+                if match:
+                    iteration = int(match.group(1))
+                    self.logger.info(f"Extracted iteration {iteration} from exp_id")
 
         result = ExperimentResult(
             experiment_id=exp_id,

@@ -53,6 +53,26 @@ class GPUAllocator:
         self.memory_headroom_percent = gpu_config.get("memory_headroom_percent", 5)
         self.enabled = gpu_config.get("enabled", True)
 
+    @staticmethod
+    def parse_waa_index(exp_id: str) -> int:
+        """
+        Extract WAA index from experiment ID.
+
+        Args:
+            exp_id: Experiment ID in format "iter{N}_exp{M}_{uuid}"
+                    e.g., "iter0_exp2_abc123" -> returns 2
+
+        Returns:
+            0-based WAA index extracted from exp{M} part.
+            Returns 0 if parsing fails.
+        """
+        match = re.match(r'iter\d+_exp(\d+)_', exp_id)
+        if match:
+            # exp_id uses 1-based indexing (exp1, exp2, ...), convert to 0-based
+            return int(match.group(1)) - 1
+        logger.warning(f"Could not parse WAA index from exp_id: {exp_id}, defaulting to 0")
+        return 0
+
     def detect_gpus(self) -> Dict[str, Any]:
         """
         Detect available GPUs using SystemSpecsDetector.
