@@ -439,10 +439,11 @@ def execute_kse_hypothesis_generation(
     output_dir: str | Path,
     iteration: int,
     codex_responses_dir: str | Path | None = None,
-    num_hypotheses: int = 3,
     timeout: int = 600,
     dry_run: bool = False,
-    logger: Optional[logging.Logger] = None
+    logger: Optional[logging.Logger] = None,
+    resume_prompt: str | None = None,
+    run_label: str | None = None
 ) -> CodexResult:
     """
     Execute KSE hypothesis generation using Codex.
@@ -452,12 +453,13 @@ def execute_kse_hypothesis_generation(
         output_dir: Directory to save hypothesis markdown files
         iteration: Current iteration number
         codex_responses_dir: Directory for JSONL output logs (e.g., experiment_run_dir/codex-responses)
-        num_hypotheses: Number of hypotheses to generate
         timeout: Maximum execution time in seconds (default: 10 minutes)
+        resume_prompt: Optional prompt for resume mode (uses `codex exec ... resume --last`)
+        run_label: Optional label for differentiating multiple KSE runs (for logging/output naming)
         logger: Optional logger instance
 
     Returns:
-        CodexResult with generated hypotheses
+        CodexResult with Codex raw output (templates parsed by caller)
     """
     output_dir = Path(output_dir)
     output_file = output_dir / f"kse_output_iter{iteration}.md"
@@ -465,70 +467,31 @@ def execute_kse_hypothesis_generation(
     if logger is None:
         logger = logging.getLogger("AutoKaggle.CodexExecutor.KSE")
 
-    # Ensure output directory exists
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    # If dry-run, synthesize hypotheses and files
+    # If dry-run, synthesize success only (templates handled by caller)
     if dry_run:
-        logger.info(f"DRY-RUN: Generating {num_hypotheses} placeholder KSE hypotheses for iteration {iteration}")
-        output_dir.mkdir(parents=True, exist_ok=True)
-        hypotheses = []
-        for i in range(1, num_hypotheses + 1):
-            exp_id = f"iter{iteration}_exp{i}_dryrun"
-            hyp_file = output_dir / f"{exp_id}_hypothesis.md"
-            hyp_file.write_text(f"# Hypothesis {exp_id}\n\n- Strategy: DryRunStrategy{i}\n", encoding="utf-8")
-            hypotheses.append({
-                "experiment_id": exp_id,
-                "strategy": f"DryRunStrategy{i}",
-                "parameters": {"dry_run": True, "index": i},
-                "file": str(hyp_file)
-            })
-        summary_path = output_dir / f"kse_summary_iter{iteration}.json"
-        summary_payload = {"iteration": iteration, "hypotheses": hypotheses}
-        summary_path.write_text(json.dumps(summary_payload, indent=2), encoding="utf-8")
         return CodexResult(
             success=True,
             mode=CodexMode.KSE,
             execution_time=0.0,
-            hypotheses=hypotheses,
             output_file=str(output_file)
         )
 
-    # Prepare instruction for Codex
-    stdin_input = f"""You are the Knowledge Strategy Engine (KSE) for AutoKaggle.
+    # Use prompt_content as-is; templates are pre-created by caller
+    stdin_input = resume_prompt if resume_prompt is not None else prompt_content
 
-{prompt_content}
-
-IMPORTANT: Generate exactly {num_hypotheses} hypothesis markdown files.
-
-For each hypothesis, create a separate file named:
-- iter{iteration}_exp1_<unique_id>_hypothesis.md
-- iter{iteration}_exp2_<unique_id>_hypothesis.md
-- iter{iteration}_exp3_<unique_id>_hypothesis.md
-
-Each file should follow the exact template structure provided in the prompt above.
-
-After creating all files, create a summary file named 'kse_summary_iter{iteration}.json' with:
-{{
-    "iteration": {iteration},
-    "hypotheses": [
-        {{
-            "experiment_id": "iter{iteration}_exp1_<id>",
-            "strategy": "strategy_name",
-            "category": "category_type",
-            "file": "path/to/hypothesis.md"
-        }},
-        ...
-    ]
-}}
-"""
-
-    logger.info(f"Executing KSE for iteration {iteration} ({num_hypotheses} hypotheses)")
+    logger.info(f"Executing KSE for iteration {iteration}")
     start_time = time.time()
 
     try:
+        cmd = ["codex", "exec", "--skip-git-repo-check"]
+        if resume_prompt:
+            cmd.extend(["resume", "--last"])
+        cmd.append("--json")
+
         proc = subprocess.run(
-            ["codex", "exec", "--skip-git-repo-check", "--json"],
+            cmd,
             input=stdin_input.encode("utf-8"),
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
@@ -540,63 +503,22 @@ After creating all files, create a summary file named 'kse_summary_iter{iteratio
         execution_time = time.time() - start_time
         raw_output = proc.stdout.decode("utf-8", errors="replace")
 
-        # Save JSONL output to codex-responses/KSE/
         if codex_responses_dir:
             codex_responses_dir_path = Path(codex_responses_dir)
-            jsonl_path = codex_responses_dir_path / "KSE" / f"response-{iteration}.jsonl"
+            suffix = run_label if run_label else ("resume" if resume_prompt else "initial")
+            jsonl_path = codex_responses_dir_path / "KSE" / f"response-{iteration}-{suffix}.jsonl"
             jsonl_path.parent.mkdir(parents=True, exist_ok=True)
             jsonl_path.write_text(raw_output, encoding="utf-8")
             logger.info(f"Saved JSONL output to {jsonl_path}")
 
         logger.info(f"KSE completed in {execution_time:.2f}s")
 
-        # Parse generated hypotheses
-        summary_file = output_dir / f"kse_summary_iter{iteration}.json"
-
-        if summary_file.exists():
-            try:
-                with open(summary_file, 'r') as f:
-                    summary_data = json.load(f)
-
-                return CodexResult(
-                    success=True,
-                    mode=CodexMode.KSE,
-                    execution_time=execution_time,
-                    raw_output=raw_output,
-                    output_file=output_file,
-                    hypotheses=summary_data.get("hypotheses", [])
-                )
-            except Exception as e:
-                logger.error(f"Failed to parse KSE summary: {e}")
-
-        # If no summary, try to find generated hypothesis files
-        hypothesis_files = list(output_dir.glob(f"iter{iteration}_exp*_hypothesis.md"))
-
-        if hypothesis_files:
-            hypotheses = []
-            for i, file in enumerate(hypothesis_files, 1):
-                hypotheses.append({
-                    "experiment_id": file.stem.replace("_hypothesis", ""),
-                    "file": str(file)
-                })
-
-            return CodexResult(
-                success=True,
-                mode=CodexMode.KSE,
-                execution_time=execution_time,
-                raw_output=raw_output,
-                output_file=output_file,
-                hypotheses=hypotheses
-            )
-
         return CodexResult(
-            success=False,
+            success=True,
             mode=CodexMode.KSE,
             execution_time=execution_time,
             raw_output=raw_output,
-            output_file=output_file,
-            error="No hypotheses generated",
-            error_type="NO_OUTPUT"
+            output_file=output_file
         )
 
     except subprocess.TimeoutExpired:
@@ -618,7 +540,6 @@ After creating all files, create a summary file named 'kse_summary_iter{iteratio
             error=f"KSE execution failed: {e}",
             error_type="EXECUTION_ERROR"
         )
-
 
 def execute_pa_analysis(
     results_data: List[Dict[str, Any]] | str,
