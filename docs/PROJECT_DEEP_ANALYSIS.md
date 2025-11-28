@@ -228,8 +228,8 @@ Stop when:
 - Needed: Conditional execution path for PA Codex mode
 
 **Configuration**:
-- Currently: Only `execution_mode` for WAA ("simulation" or "codex")
-- Needed: Separate flags for KSE and PA Codex modes
+- Currently: `simulation_mode` toggles simulator (True) vs Codex (False) for KSE/WAA/PA
+- Needed: None for enablement; reuse `simulation_mode` plus timeouts
 
 **Data Flow**:
 - Currently: KSE doesn't receive structured PA insights
@@ -277,8 +277,7 @@ Stop when:
    - PA recommendations
 3. Call Codex to generate N idea markdowns
 4. Parse and validate generated ideas
-5. Update MCDU to use KSE Codex when enabled
-6. Add config flag: `kse_codex_enabled: true`
+5. Update MCDU to use KSE Codex when `simulation_mode` is False
 
 **Estimated Files**:
 - New: `src/core/kse_codex.py` (~200-300 lines)
@@ -299,8 +298,7 @@ Stop when:
    - Competition context
 3. Call Codex to generate analysis markdown
 4. Parse structured recommendations
-5. Update MCDU to use PA Codex when enabled
-6. Add config flag: `pa_codex_enabled: true`
+5. Update MCDU to use PA Codex when `simulation_mode` is False
 
 **Estimated Files**:
 - New: `src/analysis/pa_codex.py` (~200-300 lines)
@@ -341,11 +339,7 @@ Stop when:
   "max_iterations": 5,
   "wca_per_iteration": 3,
 
-  "execution_modes": {
-    "waa": "codex",        // "simulation" or "codex"
-    "kse": "codex",        // "programmatic" or "codex"
-    "pa": "codex"          // "programmatic" or "codex"
-  },
+  "simulation_mode": false, // false => use Codex for KSE/WAA/PA, true => simulator/programmatic paths
 
   "codex": {
     "waa": {

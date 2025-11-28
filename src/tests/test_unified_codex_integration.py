@@ -42,9 +42,8 @@ def test_kse_codex_integration():
     config = {
         "kaggle_competition_name": "titanic",
         "experiment_run_dir": str(test_dir),
-        "kse_codex_enabled": True,
         "kse_codex_timeout": 30,
-        "dry_run": True  # Use dry-run to avoid actual Codex calls
+        "simulation_mode": True  # Avoid external Codex calls in tests
     }
 
     try:
@@ -71,7 +70,7 @@ def test_kse_codex_integration():
             for h in hypotheses:
                 print(f"   - {h.experiment_id}: {h.strategy_name}")
         else:
-            print("⚠️  No hypotheses generated (expected in dry-run mode)")
+        print("⚠️  No hypotheses generated")
 
         # Test subsequent hypothesis generation
         print()
@@ -122,7 +121,7 @@ def test_kse_codex_integration():
             for h in next_hypotheses:
                 print(f"   - {h.experiment_id}: {h.strategy_name}")
         else:
-            print("⚠️  No hypotheses generated (expected in dry-run mode)")
+        print("⚠️  No hypotheses generated")
 
         print()
         print("✅ KSE Codex integration test completed")
@@ -149,9 +148,8 @@ def test_pa_codex_integration():
         "kaggle_competition_name": "titanic",
         "experiment_run_dir": str(test_dir),
         "evaluation_metric": "accuracy",
-        "pa_codex_enabled": True,
         "pa_codex_timeout": 30,
-        "dry_run": True,  # Use dry-run to avoid actual Codex calls
+        "simulation_mode": True,  # Avoid external Codex calls in tests
         "max_iterations": 3
     }
 
@@ -212,12 +210,6 @@ def test_pa_codex_integration():
         print(f"   - Best Score: {analysis.best_score}")
         print(f"   - Best Experiment: {analysis.best_experiment_id}")
         print(f"   - Trend: {analysis.improvement_trend}")
-
-        if config["pa_codex_enabled"] and not config["dry_run"]:
-            # These would be populated by Codex in non-dry-run mode
-            print(f"   - Success Patterns: {len(analysis.success_patterns)}")
-            print(f"   - High Priority Recs: {len(analysis.high_priority_recommendations)}")
-            print(f"   - Unresolved Questions: {len(analysis.unresolved_questions)}")
 
         print()
         print("2. Testing PA prompt preparation")
@@ -410,8 +402,7 @@ def test_end_to_end_flow():
     print()
 
     print("Configuration Requirements:")
-    print("   - kse_codex_enabled: true")
-    print("   - pa_codex_enabled: true")
+    print("   - simulation_mode: toggle to False to exercise Codex paths")
     print("   - waa_codex_enabled: true (if using Codex for experiments)")
     print()
 

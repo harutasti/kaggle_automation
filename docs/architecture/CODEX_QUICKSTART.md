@@ -1,5 +1,7 @@
 # Codex Integration - Quick Start
 
+> NOTE: Legacy references to `execution_mode`/`execution_modes` in this document are obsolete. The code now uses a single `simulation_mode` flag (True = simulator, False = Codex) across KSE/WAA/PA.
+
 ## What Was Created
 
 ### Core Execution Engine
@@ -102,7 +104,7 @@ Edit `src/execution/eo.py`:
 def _launch_single_experiment(self, hypothesis):
     """Launch experiment - choose mode based on config"""
 
-    if self.config.get("execution_mode") == "codex":
+    if not self.config.get("simulation_mode", False):
         # Use Codex
         from .codex_launcher import CodexExperimentLauncher
         launcher = CodexExperimentLauncher(self.config)
@@ -142,7 +144,6 @@ result = launcher.launch_experiment(hypothesis, worktree_path)
 ### Simulation Mode (Free)
 ```json
 {
-  "execution_mode": "simulation",
   "simulation_mode": true
 }
 ```
@@ -150,7 +151,6 @@ result = launcher.launch_experiment(hypothesis, worktree_path)
 ### Codex Mode (Real AI)
 ```json
 {
-  "execution_mode": "codex",
   "simulation_mode": false,
   "wca_per_iteration": 1,
   "max_iterations": 2,
@@ -228,7 +228,7 @@ result = parse_result_json()  # Actual score
 - [ ] Copy `config_codex.json` to `config.json`
 
 ### Integration Steps
-- [ ] Add execution_mode switch to EO
+- [ ] Use `simulation_mode` to toggle simulator vs Codex in EO
 - [ ] Test with 1 experiment manually
 - [ ] Run full system with Codex
 - [ ] Monitor costs and adjust
@@ -289,7 +289,7 @@ Monitor usage after each step!
    Yes! No changes needed to KSE or task generation.
 
 2. **Can I switch back to simulation?**
-   Yes! Just change `execution_mode` in config.
+   Yes! Just change `simulation_mode` in config.
 
 3. **Do I need to modify EO?**
    Minimal changes - just add mode switch.

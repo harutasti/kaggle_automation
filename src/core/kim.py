@@ -20,11 +20,10 @@ class KaggleInterfaceManager(BaseComponent):
         # Use experiment_run_dir if available (timestamped), otherwise fall back to experiments_base_dir
         self.experiment_run_dir = config.get("experiment_run_dir", config.get("experiments_base_dir", "./experiments"))
         self.download_dir = os.path.join(self.experiment_run_dir, "kaggle_data")
-        self.dry_run = config.get("dry_run", False)
+        self.simulation_mode = config.get("simulation_mode", False)
         ensure_dir(self.download_dir)
 
-        self.api = self._authenticate_kaggle()
-        self.simulation_mode = config.get("simulation_mode", False)
+        self.api = None if self.simulation_mode else self._authenticate_kaggle()
         self.use_crawler = config.get("use_crawler", True)  # Default to using crawler
         self.crawler_output_dir = "kaggle_competitions"
         self.max_discussions = config.get("max_discussions", 20)
@@ -34,9 +33,6 @@ class KaggleInterfaceManager(BaseComponent):
 
     def _authenticate_kaggle(self):
         """Authenticate with the Kaggle API."""
-        if self.dry_run:
-            self.logger.info("DRY-RUN: Skipping Kaggle authentication")
-            return None
         try:
             # Import here to avoid authentication at module import time
             from kaggle.api.kaggle_api_extended import KaggleApi
@@ -45,12 +41,11 @@ class KaggleInterfaceManager(BaseComponent):
             self.logger.info("Kaggle API authenticated successfully.")
             return api
         except ImportError:
-            self.logger.error("Could not import Kaggle API. Try 'uv add kaggle'.")
-            return None
+            self.logger.critical("Kaggle API is not available. Install the kaggle package and authenticate before running.")
+            sys.exit(1)
         except Exception as e:
-            self.logger.error(f"Kaggle API authentication failed: {e}")
-            self.logger.warning("Falling back to simulation mode.")
-            return None
+            self.logger.critical(f"Kaggle API authentication failed: {e}")
+            sys.exit(1)
     
     def _run_crawler(self, force: bool = False) -> bool:
         """Run kaggle_crawler to fetch competition data"""
@@ -84,17 +79,6 @@ class KaggleInterfaceManager(BaseComponent):
         method_name = "get_competition_info"
         self._log_start(method_name)
         try:
-            if self.dry_run:
-                dummy_deadline = datetime.datetime.now() + datetime.timedelta(days=30)
-                info = CompetitionInfo(
-                    name=self.competition_name,
-                    evaluation_metric="AUC",
-                    deadline=dummy_deadline,
-                    description_markdown=f"# Competition: {self.competition_name}\n\nDRY-RUN placeholder description.",
-                    data_files=["train.csv", "test.csv", "sample_submission.csv"]
-                )
-                self._log_end(method_name, info)
-                return info
             # First, try to use crawler data if enabled
             if self.use_crawler and not self.simulation_mode:
                 # Check if crawler data exists
@@ -119,7 +103,7 @@ class KaggleInterfaceManager(BaseComponent):
                         self.logger.warning("Failed to parse crawler data, will try other methods")
             
             # Fall back to API or simulation
-            if self.simulation_mode or self.api is None:
+            if self.simulation_mode:
                 # Dummy data for simulation mode or when API auth failed
                 dummy_deadline = datetime.datetime.now() + datetime.timedelta(days=30)
                 info = CompetitionInfo(
@@ -161,7 +145,7 @@ class KaggleInterfaceManager(BaseComponent):
                     data_files=data_files
                 )
                 self.logger.info(f"Successfully retrieved info for competition: {info.name}")
-            
+
             self._log_end(method_name, info)
             return info
         except Exception as e:
@@ -175,25 +159,6 @@ class KaggleInterfaceManager(BaseComponent):
         try:
             ensure_dir(self.download_dir)
 
-            if self.dry_run:
-                # Create realistic placeholder data files to mimic a full run
-                placeholders = {
-                    "train.csv": "id,feature1,target\n1,0.1,0\n2,0.2,1\n",
-                    "test.csv": "id,feature1\n1,0.0\n2,0.1\n",
-                    "sample_submission.csv": "id,prediction\n1,0.5\n2,0.5\n",
-                }
-                for filename, content in placeholders.items():
-                    path = os.path.join(self.download_dir, filename)
-                    if not os.path.exists(path):
-                        with open(path, "w", encoding="utf-8") as f:
-                            f.write(content)
-                        self.logger.info(f"DRY-RUN: Created placeholder {filename}")
-                competition_info.data_files = list(placeholders.keys())
-                if self.analyze_dataset:
-                    self._analyze_competition_dataset()
-                self._log_end(method_name, result=True)
-                return True
-            
             # First, check if crawler has already downloaded the data
             if self.use_crawler and not self.simulation_mode:
                 crawler_data_dir = os.path.join(self.crawler_output_dir, self.competition_name, "data")
@@ -220,14 +185,22 @@ class KaggleInterfaceManager(BaseComponent):
                     return True
             
             # Fall back to API or simulation
-            if self.simulation_mode or self.api is None:
-                # Create dummy files for simulation mode or when API auth failed
-                for filename in competition_info.data_files:
-                    dummy_file_path = os.path.join(self.download_dir, filename)
-                    if not os.path.exists(dummy_file_path):
-                        with open(dummy_file_path, 'w') as f:
-                            f.write("dummy data for " + filename)
-                        self.logger.info(f"Created dummy data file: {dummy_file_path}")
+            if self.simulation_mode:
+                # Create realistic placeholder data files to mimic a full run
+                placeholders = {
+                    "train.csv": "id,feature1,target\n1,0.1,0\n2,0.2,1\n",
+                    "test.csv": "id,feature1\n1,0.0\n2,0.1\n",
+                    "sample_submission.csv": "id,prediction\n1,0.5\n2,0.5\n",
+                }
+                for filename, content in placeholders.items():
+                    path = os.path.join(self.download_dir, filename)
+                    if not os.path.exists(path):
+                        with open(path, "w", encoding="utf-8") as f:
+                            f.write(content)
+                        self.logger.info(f"Simulation mode: created placeholder {filename}")
+                competition_info.data_files = list(placeholders.keys())
+            elif self.api is None:
+                raise RuntimeError("Kaggle API is unavailable; cannot download competition data.")
             else:
                 # Download files from Kaggle API
                 self.logger.info(f"Downloading competition files for {self.competition_name} to {self.download_dir}")

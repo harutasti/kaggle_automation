@@ -2,6 +2,8 @@ import os
 import uuid
 import random
 import json
+import re
+from pathlib import Path
 from typing import List, Optional, Dict, Any
 
 from .base_component import BaseComponent
@@ -10,8 +12,7 @@ from ..utils.file_utils import write_markdown, ensure_dir
 from ..utils.crawler_parser import parse_discussion_strategies
 from ..utils.dataset_analyzer import DatasetAnalyzer
 from ..utils.system_specs import SystemSpecsDetector
-from ..utils.prompt_filler import PromptFiller
-from ..utils.codex_executor import CodexMode, execute_codex
+from ..utils.codex_executor import CodexMode, execute_codex, CodexResult
 from ..utils.gpu_allocator import GPUAllocator
 
 class KnowledgeStrategyEngine(BaseComponent):
@@ -21,7 +22,7 @@ class KnowledgeStrategyEngine(BaseComponent):
         # Use experiment_run_dir if available (timestamped), otherwise fall back to experiments_base_dir
         self.experiment_run_dir = config.get("experiment_run_dir", config.get("experiments_base_dir", "./experiments"))
         self.hypothesis_dir = os.path.join(self.experiment_run_dir, "hypotheses")
-        self.dry_run = config.get("dry_run", False)
+        self.simulation_mode = config.get("simulation_mode", False)
         ensure_dir(self.hypothesis_dir)
 
         self.competition_name = config.get("kaggle_competition_name")
@@ -31,12 +32,11 @@ class KnowledgeStrategyEngine(BaseComponent):
         # Initialize new components
         self.system_specs_detector = SystemSpecsDetector()
         self.system_specs = None  # Will be populated on first use
-        self.prompt_filler = PromptFiller(config)
         self.dataset_analyzer = None  # Will be initialized when needed
         self.dataset_analysis = None  # Cache for dataset analysis
 
-        # Codex execution mode for KSE (if enabled)
-        self.use_codex_for_generation = config.get("kse_codex_enabled", False)
+        # Codex execution mode for KSE is driven by simulation_mode
+        self.use_codex_for_generation = not self.simulation_mode
         self.codex_timeout = config.get("kse_codex_timeout", 600)
 
         # Prompts directory for loading template files
@@ -155,6 +155,109 @@ class KnowledgeStrategyEngine(BaseComponent):
                         if "EnsembleBlend" not in self.strategies:
                             self.strategies.append("EnsembleBlend")
 
+    def _get_kse_template_paths(self) -> Dict[str, Path]:
+        """Return paths to KSE instruction and template files."""
+        base_dir = Path(self.prompts_dir) if self.prompts_dir else Path("prompts")
+        kse_dir = base_dir / "KSE"
+
+        instruction = kse_dir / "kse_codex_prompt.md"
+        common = kse_dir / "waa_common_template.md"
+        experiment = kse_dir / "waa_experiment_template.md"
+
+        for path in [instruction, common, experiment]:
+            if not path.exists():
+                raise FileNotFoundError(f"KSE template missing: {path}")
+
+        return {
+            "instruction": instruction,
+            "common": common,
+            "experiment": experiment
+        }
+
+    def _prepare_iteration_directory(self, iteration: int) -> Path:
+        """Create and return the iteration-specific hypothesis directory."""
+        iteration_dir = Path(self.hypothesis_dir) / f"iter{iteration}"
+        iteration_dir.mkdir(parents=True, exist_ok=True)
+        return iteration_dir
+
+    def _build_experiment_ids(self, iteration: int, num_hypotheses: int) -> List[str]:
+        """Generate experiment identifiers for this iteration."""
+        exp_ids = []
+        for i in range(num_hypotheses):
+            exp_ids.append(f"iter{iteration}_exp{i+1}_{uuid.uuid4().hex[:6]}")
+        return exp_ids
+
+    def _prepare_iteration_templates(self, iteration: int, exp_ids: List[str]) -> Dict[str, Any]:
+        """
+        Copy KSE templates into the iteration directory and pre-fill experiment IDs.
+
+        Returns a dict with iteration_dir, instruction_path, common_path, experiment_paths.
+        """
+        template_paths = self._get_kse_template_paths()
+        iteration_dir = self._prepare_iteration_directory(iteration)
+
+        # Common template
+        common_target = iteration_dir / "waa_common_filled.md"
+        common_target.write_text(template_paths["common"].read_text(encoding="utf-8"), encoding="utf-8")
+
+        # Experiment templates (one per experiment)
+        experiment_template_raw = template_paths["experiment"].read_text(encoding="utf-8")
+        experiment_paths: List[Path] = []
+        for exp_id in exp_ids:
+            exp_content = experiment_template_raw.replace("{{EXPERIMENT_ID}}", exp_id)
+            exp_target = iteration_dir / f"{exp_id}_plan.md"
+            exp_target.write_text(exp_content, encoding="utf-8")
+            experiment_paths.append(exp_target)
+
+        return {
+            "iteration_dir": iteration_dir,
+            "instruction_path": template_paths["instruction"],
+            "common_path": common_target,
+            "experiment_paths": experiment_paths
+        }
+
+    def _get_data_paths_relative(self, iteration_dir: Path) -> Dict[str, str]:
+        """Return relative paths for kaggle and crawler data for prompt inclusion."""
+        kaggle_data_dir = Path(self.hypothesis_dir) / "kaggle_data"
+        crawler_data_dir = Path(self.hypothesis_dir) / "crawler_data"
+
+        kaggle_rel = os.path.relpath(kaggle_data_dir, iteration_dir) if kaggle_data_dir.exists() else "not available"
+        crawler_rel = os.path.relpath(crawler_data_dir, iteration_dir) if crawler_data_dir.exists() else "not available"
+
+        return {"kaggle": kaggle_rel, "crawler": crawler_rel}
+
+    def _compose_system_context(self,
+                                competition_info: CompetitionInfo,
+                                num_hypotheses: int,
+                                analysis_result: Optional[AnalysisResult],
+                                previous_results: Optional[List[ExperimentResult]]) -> str:
+        """Build a compact system context block appended to the KSE prompt."""
+        dataset_analysis = self._get_dataset_analysis(competition_info)
+        system_specs = self._get_system_specs()
+
+        context_lines = [
+            f"- evaluation_metric: {competition_info.evaluation_metric}",
+            f"- data_files: {', '.join(competition_info.data_files)}",
+            f"- dataset quick stats: train_size={dataset_analysis.get('train_size')}, features={dataset_analysis.get('feature_count')}, target={dataset_analysis.get('target_variable')}",
+            f"- system: GPU available={system_specs.get('gpu_available', 'Unknown')}, memory={system_specs.get('memory_gb', 'Unknown')} GB",
+            f"- planned experiments this iteration: {num_hypotheses}"
+        ]
+
+        if analysis_result:
+            context_lines.append(
+                f"- previous best score: {analysis_result.best_score} (exp_id={analysis_result.best_experiment_id})"
+            )
+
+        if previous_results:
+            # Show up to three recent results for guidance
+            recent = previous_results[-3:]
+            for res in recent:
+                context_lines.append(
+                    f"- prior result: {res.experiment_id} | {res.strategy_name} | score={res.score}"
+                )
+
+        return "\n\n## System-provided quick context\n" + "\n".join(context_lines)
+
     def generate_initial_hypotheses(self, competition_info: CompetitionInfo, num_hypotheses: int) -> List[ExperimentHypothesis]:
         """Generate initial experiment hypotheses."""
         method_name = "generate_initial_hypotheses"
@@ -171,21 +274,23 @@ class KnowledgeStrategyEngine(BaseComponent):
         else:
             # Fallback to original programmatic generation
             hypotheses = []
+            iteration_dir = Path(self.hypothesis_dir) / "iter0"
+            iteration_dir.mkdir(parents=True, exist_ok=True)
             for i in range(num_hypotheses):
                 exp_id = f"iter0_exp{i+1}_{uuid.uuid4().hex[:6]}"
                 strategy = random.choice(self.strategies)
                 params = self._get_dummy_params(strategy)
-                task_md_path = os.path.join(self.hypothesis_dir, f"{exp_id}_task.md")
+                task_md_path = iteration_dir / f"{exp_id}_task.md"
 
                 task_markdown = self._generate_task_markdown(exp_id, 0, strategy, params, competition_info, num_hypotheses)
-                write_markdown(task_markdown, task_md_path)
+                write_markdown(task_markdown, str(task_md_path))
 
                 hypothesis = ExperimentHypothesis(
                     experiment_id=exp_id,
                     iteration=0,
                     strategy_name=strategy,
                     parameters=params,
-                    task_markdown_path=task_md_path
+                    task_markdown_path=str(task_md_path)
                 )
                 hypotheses.append(hypothesis)
                 self.logger.debug(f"Generated hypothesis: {exp_id} ({strategy})")
@@ -200,127 +305,289 @@ class KnowledgeStrategyEngine(BaseComponent):
                                        is_initial: bool = True,
                                        analysis_result: Optional[AnalysisResult] = None,
                                        previous_results: Optional[List[ExperimentResult]] = None) -> List[ExperimentHypothesis]:
-        """Generate hypotheses using Codex with external prompt templates."""
+        """Generate hypotheses using Codex with the new A/B template pipeline."""
         self.logger.info(f"Generating hypotheses using Codex for iteration {iteration}")
 
-        # Gather all data for placeholder filling
-        competition_data = {
-            "name": competition_info.name,
-            "evaluation_metric": competition_info.evaluation_metric,
-            "submission_format": "csv with id and prediction columns",  # Default format
-            "deadline": str(competition_info.deadline) if competition_info.deadline else "[ASSUMED: No deadline]"
-        }
+        # Prepare iteration workspace and template files
+        exp_ids = self._build_experiment_ids(iteration, num_hypotheses)
+        template_info = self._prepare_iteration_templates(iteration, exp_ids)
+        iteration_dir: Path = template_info["iteration_dir"]
 
-        # Get system specs
-        system_specs = self._get_system_specs()
-
-        # Get dataset analysis
-        dataset_analysis = self._get_dataset_analysis(competition_info)
-
-        # Get community insights
-        community_insights = self._get_community_insights()
-
-        if is_initial:
-            # Fill initial iteration prompt
-            filled_prompt = self.prompt_filler.fill_initial_prompt(
-                competition_info=competition_data,
-                dataset_analysis=dataset_analysis,
-                system_specs=system_specs,
-                community_insights=community_insights,
-                num_hypotheses=num_hypotheses
-            )
-        else:
-            # Prepare iteration results for subsequent prompts
-            iteration_results = self._prepare_iteration_results(previous_results)
-            pa_analysis = self._prepare_pa_analysis(analysis_result)
-
-            # Fill subsequent iteration prompt
-            filled_prompt = self.prompt_filler.fill_subsequent_prompt(
-                competition_info=competition_data,
-                dataset_analysis=dataset_analysis,
-                system_specs=system_specs,
-                community_insights=community_insights,
-                iteration_results=iteration_results,
-                pa_analysis=pa_analysis,
-                iteration_number=iteration,
-                num_hypotheses=num_hypotheses
-            )
+        # Build Codex prompt that instructs filling common + experiment templates
+        filled_prompt = self._build_kse_prompt(
+            competition_info=competition_info,
+            num_hypotheses=num_hypotheses,
+            iteration=iteration,
+            template_info=template_info,
+            analysis_result=analysis_result,
+            previous_results=previous_results
+        )
 
         # Save filled prompt for debugging
-        prompt_path = os.path.join(self.hypothesis_dir, f"kse_prompt_iter{iteration}.md")
-        self.prompt_filler.save_filled_prompt(filled_prompt, prompt_path)
+        prompt_path = iteration_dir / f"kse_prompt_iter{iteration}.md"
+        prompt_path.write_text(filled_prompt, encoding="utf-8")
         self.logger.info(f"Saved filled prompt to {prompt_path}")
 
-        # Execute Codex to generate hypotheses
-        self.logger.info(f"Calling Codex for KSE hypothesis generation (iteration {iteration})")
-
-        # Get codex-responses directory for JSONL output
+        # Execute Codex to fill templates
         codex_responses_dir = os.path.join(self.experiment_run_dir, "codex-responses")
-
         try:
             codex_result = execute_codex(
                 mode=CodexMode.KSE,
                 prompt_content=filled_prompt,
-                output_dir=self.hypothesis_dir,
+                output_dir=str(iteration_dir),
                 iteration=iteration,
                 codex_responses_dir=codex_responses_dir,
-                num_hypotheses=num_hypotheses,
-                dry_run=self.config.get("dry_run", False),
-                timeout=self.codex_timeout
+                timeout=self.codex_timeout,
+                logger=self.logger
             )
-
-            if codex_result.success and codex_result.hypotheses:
-                # Parse Codex output to create ExperimentHypothesis objects
-                hypotheses = []
-                for hyp_data in codex_result.hypotheses:
-                    exp_id = hyp_data.get("experiment_id", f"iter{iteration}_exp{len(hypotheses)+1}_{uuid.uuid4().hex[:6]}")
-                    strategy = hyp_data.get("strategy", "Unknown")
-                    params = hyp_data.get("parameters", {})
-                    task_md_path = os.path.join(self.hypothesis_dir, f"{exp_id}_task.md")
-
-                    # Generate task markdown from hypothesis
-                    task_markdown = self._generate_task_markdown_from_hypothesis(
-                        exp_id, iteration, strategy, params, competition_info, hyp_data, num_hypotheses
-                    )
-                    write_markdown(task_markdown, task_md_path)
-
-                    hypothesis = ExperimentHypothesis(
-                        experiment_id=exp_id,
-                        iteration=iteration,
-                        strategy_name=strategy,
-                        parameters=params,
-                        task_markdown_path=task_md_path
-                    )
-                    hypotheses.append(hypothesis)
-
-                self.logger.info(f"Successfully generated {len(hypotheses)} hypotheses from Codex")
-                return hypotheses
-
-            else:
-                self.logger.warning(f"Codex execution failed or returned no hypotheses: {codex_result.error}")
-                self.logger.warning("Falling back to programmatic generation")
-
         except Exception as e:
             self.logger.error(f"Error calling Codex for KSE: {e}")
-            self.logger.warning("Falling back to programmatic generation")
+            codex_result = CodexResult(
+                success=False,
+                mode=CodexMode.KSE,
+                execution_time=0.0,
+                error=str(e)
+            )
 
-        # Fallback to programmatic generation
+        if not codex_result.success:
+            self.logger.warning(f"Codex execution failed: {codex_result.error}")
+            self.logger.warning("Falling back to programmatic generation")
+            return self._generate_programmatic_hypotheses(iteration, num_hypotheses, competition_info, previous_results)
+
+        # Check placeholders and optionally trigger resume to complete them
+        placeholder_map = self._find_remaining_placeholders(
+            [template_info["common_path"]] + template_info["experiment_paths"]
+        )
+
+        if placeholder_map:
+            placeholder_map = self._resolve_placeholders_with_resume(
+                iteration=iteration,
+                iteration_dir=iteration_dir,
+                template_paths=[template_info["common_path"]] + template_info["experiment_paths"],
+                codex_responses_dir=codex_responses_dir
+            )
+
+        if placeholder_map:
+            self.logger.warning(f"Placeholders remain after Codex runs: {placeholder_map}")
+            self.logger.warning("Falling back to programmatic generation")
+            return self._generate_programmatic_hypotheses(iteration, num_hypotheses, competition_info, previous_results)
+
+        # Build final hypotheses and WAA task markdowns from filled templates
+        hypotheses = self._create_hypotheses_from_templates(
+            iteration=iteration,
+            exp_ids=exp_ids,
+            common_path=template_info["common_path"],
+            experiment_paths=template_info["experiment_paths"],
+            competition_info=competition_info,
+            total_waas=num_hypotheses
+        )
+
+        self.logger.info(f"Successfully prepared {len(hypotheses)} hypotheses from filled templates")
+        return hypotheses
+
+    def _build_kse_prompt(self,
+                          competition_info: CompetitionInfo,
+                          num_hypotheses: int,
+                          iteration: int,
+                          template_info: Dict[str, Any],
+                          analysis_result: Optional[AnalysisResult],
+                          previous_results: Optional[List[ExperimentResult]]) -> str:
+        """Build the Codex instruction prompt for KSE based on the instruction file."""
+        instruction_path: Path = template_info["instruction_path"]
+        prompt_template = instruction_path.read_text(encoding="utf-8")
+
+        data_paths = self._get_data_paths_relative(template_info["iteration_dir"])
+        common_rel = os.path.relpath(template_info["common_path"], template_info["iteration_dir"])
+        experiment_rel_lines = "\n  ".join(
+            f"- {os.path.relpath(path, template_info['iteration_dir'])}"
+            for path in template_info["experiment_paths"]
+        )
+        experiment_paths_block = f"\n  {experiment_rel_lines}" if experiment_rel_lines else ""
+
+        kaggle_path_label = (
+            f"{data_paths['kaggle']} (Kaggle API data)" if data_paths["kaggle"] != "not available" else "not available"
+        )
+        crawler_path_label = (
+            f"{data_paths['crawler']} (crawler outputs)" if data_paths["crawler"] != "not available" else "not available"
+        )
+
+        replacements = {
+            "<<COMPETITION_NAME>>": competition_info.name or "Unknown competition",
+            "<<ITERATION_NUMBER>>": str(iteration),
+            "<<NUM_EXPERIMENTS>>": str(num_hypotheses),
+            "<<DATA_SOURCES>>": kaggle_path_label,
+            "<<CRAWLER_SOURCES>>": crawler_path_label,
+            "<<COMMON_TEMPLATE_PATH>>": common_rel,
+            "<<EXPERIMENT_TEMPLATE_PATHS>>": experiment_paths_block
+        }
+
+        prompt = prompt_template
+        for token, value in replacements.items():
+            prompt = prompt.replace(token, value)
+
+        prompt += self._compose_system_context(
+            competition_info=competition_info,
+            num_hypotheses=num_hypotheses,
+            analysis_result=analysis_result,
+            previous_results=previous_results
+        )
+
+        return prompt
+
+    def _find_remaining_placeholders(self, paths: List[Path]) -> Dict[str, List[str]]:
+        """Return remaining {{placeholders}} in the given files."""
+        placeholder_map: Dict[str, List[str]] = {}
+        for path in paths:
+            try:
+                content = Path(path).read_text(encoding="utf-8")
+            except Exception as e:
+                self.logger.warning(f"Failed to read template {path}: {e}")
+                continue
+            matches = re.findall(r"\{\{([^{}]+)\}\}", content)
+            if matches:
+                placeholder_map[str(path)] = sorted(set(m.strip() for m in matches))
+        return placeholder_map
+
+    def _resolve_placeholders_with_resume(self,
+                                          iteration: int,
+                                          iteration_dir: Path,
+                                          template_paths: List[Path],
+                                          codex_responses_dir: str | None) -> Dict[str, List[str]]:
+        """Run Codex resume to fill any remaining placeholders."""
+        remaining = self._find_remaining_placeholders(template_paths)
+        max_attempts = self.config.get("kse_resume_attempts", 2)
+        attempt = 0
+
+        while remaining and attempt < max_attempts:
+            missing_lines = []
+            for file_path, placeholders in remaining.items():
+                rel_path = os.path.relpath(file_path, iteration_dir)
+                missing_lines.append(f"- {rel_path}: {', '.join(placeholders)}")
+
+            resume_prompt = (
+                "Some placeholders are still empty. Fill ONLY the missing placeholders listed below, "
+                "without altering already completed content. Remove every `{{...}}` token.\n"
+                "Placeholders to fill:\n" + "\n".join(missing_lines)
+            )
+
+            execute_codex(
+                mode=CodexMode.KSE,
+                prompt_content=resume_prompt,
+                output_dir=str(iteration_dir),
+                iteration=iteration,
+                codex_responses_dir=codex_responses_dir,
+                timeout=self.codex_timeout,
+                logger=self.logger,
+                resume_prompt=resume_prompt,
+                run_label=f"resume{attempt+1}"
+            )
+
+            remaining = self._find_remaining_placeholders(template_paths)
+            attempt += 1
+
+        return remaining
+
+    def _create_hypotheses_from_templates(self,
+                                          iteration: int,
+                                          exp_ids: List[str],
+                                          common_path: Path,
+                                          experiment_paths: List[Path],
+                                          competition_info: CompetitionInfo,
+                                          total_waas: int) -> List[ExperimentHypothesis]:
+        """Assemble final WAA prompts and ExperimentHypothesis objects from filled templates."""
+        common_content = Path(common_path).read_text(encoding="utf-8")
+        hypotheses: List[ExperimentHypothesis] = []
+
+        for exp_id, exp_path in zip(exp_ids, experiment_paths):
+            experiment_content = Path(exp_path).read_text(encoding="utf-8")
+            strategy, params = self._extract_strategy_and_params_from_template(experiment_content, exp_id)
+
+            task_content = self._compose_task_content_from_templates(common_content, experiment_content, exp_id)
+
+            # Wrap in unified WAA template
+            template = self._load_waa_template()
+            gpu_section = self._get_gpu_instructions_section(exp_id, total_waas)
+            task_markdown = template.format(
+                gpu_allocation_section=gpu_section,
+                task_content=task_content,
+                exp_id=exp_id
+            )
+
+            task_md_path = Path(self.hypothesis_dir) / f"iter{iteration}" / f"{exp_id}_task.md"
+            task_md_path.parent.mkdir(parents=True, exist_ok=True)
+            task_md_path.write_text(task_markdown, encoding="utf-8")
+
+            hypotheses.append(
+                ExperimentHypothesis(
+                    experiment_id=exp_id,
+                    iteration=iteration,
+                    strategy_name=strategy,
+                    parameters=params,
+                    task_markdown_path=str(task_md_path)
+                )
+            )
+
+        return hypotheses
+
+    def _extract_strategy_and_params_from_template(self, content: str, exp_id: str) -> tuple[str, Dict[str, Any]]:
+        """Parse strategy name and parameters JSON block from a filled experiment template."""
+        strategy = f"Strategy_{exp_id}"
+        strategy_match = re.search(r"strategy_name:\s*(.+)", content, re.IGNORECASE)
+        if strategy_match:
+            strategy = strategy_match.group(1).strip()
+
+        params: Dict[str, Any] = {}
+        json_match = re.search(r"```json\s*(\{.*?\})\s*```", content, re.DOTALL)
+        if json_match:
+            try:
+                params = json.loads(json_match.group(1))
+            except Exception as e:
+                self.logger.warning(f"Failed to parse parameters JSON for {exp_id}: {e}")
+
+        return strategy, params
+
+    def _compose_task_content_from_templates(self, common_content: str, experiment_content: str, exp_id: str) -> str:
+        """Combine common and per-experiment templates into WAA task content."""
+        execution_notes = (
+            f"\n## Execution Checklist\n"
+            f"- Follow the experiment blueprint above precisely for {exp_id}.\n"
+            f"- Produce `result_{exp_id}.json` with the validation metric.\n"
+            f"- Produce `submission_{exp_id}.csv` in the competition format.\n"
+            f"- Log key steps and metrics to `waa_{exp_id}.log`.\n"
+            f"- Create `DONE_{exp_id}` when all outputs are ready.\n"
+        )
+
+        return (
+            f"# Experiment Task: {exp_id}\n\n"
+            f"## Competition-Wide Plan\n{common_content}\n\n"
+            f"## Experiment Plan\n{experiment_content}\n"
+            f"{execution_notes}"
+        )
+
+    def _generate_programmatic_hypotheses(self,
+                                          iteration: int,
+                                          num_hypotheses: int,
+                                          competition_info: CompetitionInfo,
+                                          previous_results: Optional[List[ExperimentResult]]) -> List[ExperimentHypothesis]:
+        """Fallback hypothesis generation without Codex."""
+        iteration_dir = Path(self.hypothesis_dir) / f"iter{iteration}"
+        iteration_dir.mkdir(parents=True, exist_ok=True)
         hypotheses = []
         for i in range(num_hypotheses):
             exp_id = f"iter{iteration}_exp{i+1}_{uuid.uuid4().hex[:6]}"
             strategy = random.choice(self.strategies)
             params = self._get_dummy_params(strategy, previous_results)
-            task_md_path = os.path.join(self.hypothesis_dir, f"{exp_id}_task.md")
+            task_md_path = iteration_dir / f"{exp_id}_task.md"
 
             task_markdown = self._generate_task_markdown(exp_id, iteration, strategy, params, competition_info, num_hypotheses)
-            write_markdown(task_markdown, task_md_path)
+            write_markdown(task_markdown, str(task_md_path))
 
             hypothesis = ExperimentHypothesis(
                 experiment_id=exp_id,
                 iteration=iteration,
                 strategy_name=strategy,
                 parameters=params,
-                task_markdown_path=task_md_path
+                task_markdown_path=str(task_md_path)
             )
             hypotheses.append(hypothesis)
 
@@ -417,6 +684,8 @@ class KnowledgeStrategyEngine(BaseComponent):
         else:
             # Fallback to original programmatic generation
             hypotheses = []
+            iteration_dir = Path(self.hypothesis_dir) / f"iter{current_iteration}"
+            iteration_dir.mkdir(parents=True, exist_ok=True)
 
             # Choose strategies based on analysis/history (simulation uses random + tweaks)
             possible_strategies = self.strategies[:]  # Make a copy
@@ -434,17 +703,17 @@ class KnowledgeStrategyEngine(BaseComponent):
                 # Select strategy (prioritize recommendations; otherwise rotate)
                 strategy = possible_strategies[i % len(possible_strategies)]
                 params = self._get_dummy_params(strategy, previous_results)  # Could adjust params using past results
-                task_md_path = os.path.join(self.hypothesis_dir, f"{exp_id}_task.md")
+                task_md_path = iteration_dir / f"{exp_id}_task.md"
 
                 task_markdown = self._generate_task_markdown(exp_id, current_iteration, strategy, params, competition_info, num_hypotheses)
-                write_markdown(task_markdown, task_md_path)
+                write_markdown(task_markdown, str(task_md_path))
 
                 hypothesis = ExperimentHypothesis(
                     experiment_id=exp_id,
                     iteration=current_iteration,
                     strategy_name=strategy,
                     parameters=params,
-                    task_markdown_path=task_md_path
+                    task_markdown_path=str(task_md_path)
                 )
                 hypotheses.append(hypothesis)
                 self.logger.debug(f"Generated hypothesis: {exp_id} ({strategy})")

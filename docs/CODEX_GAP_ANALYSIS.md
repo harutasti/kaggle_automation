@@ -8,7 +8,7 @@
 - **Logging**: All KSE/WAA/PA outputs saved as MD for humans and AIs.
 
 ## Current State (repo review)
-- Execution modes: `simulation` (wca_simulator) or `codex` (Codex executor) controlled via `execution_mode` in config.
+- Execution is governed by `simulation_mode` (True = simulator, False = Codex).
 - KSE (`src/core/kse.py`): Generates random strategies/params; optionally pulls discussion strategies via crawler parser; writes a single task markdown per hypothesis; no Codex/AI invocation.
 - WAA:
   - Simulator: `src/execution/wca_simulator.py` (now WAA) produces dummy results/logs (plain text, not MD).

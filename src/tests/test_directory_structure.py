@@ -32,20 +32,16 @@ def test_directory_structure():
         "experiments_base_dir": "./test_experiments",
         "max_iterations": 2,
         "wca_per_iteration": 2,
-        "simulation_mode": True,
-        "kse_codex_enabled": False,
-        "pa_codex_enabled": False
+        "simulation_mode": True
     }
 
     # Clean up any previous test
     if os.path.exists("./test_experiments"):
         shutil.rmtree("./test_experiments")
 
-    print("1. Testing NORMAL mode (creates directories)")
+    print("1. Testing directory creation")
     print("-" * 40)
 
-    # Simulate normal mode
-    dry_run = False
     timestamp1 = datetime.now().strftime("%Y%m%d_%H%M%S")
 
     # Get competition name
@@ -61,54 +57,32 @@ def test_directory_structure():
     print(f"Timestamp: {timestamp1}")
     print(f"Directory: {experiment_run_dir}")
 
-    if not dry_run:
-        # Create directories
-        from src.utils.file_utils import ensure_dir
+    # Create directories
+    from src.utils.file_utils import ensure_dir
 
-        ensure_dir(experiment_run_dir)
-        ensure_dir(os.path.join(experiment_run_dir, "worktrees"))
-        ensure_dir(os.path.join(experiment_run_dir, "results"))
-        ensure_dir(os.path.join(experiment_run_dir, "hypotheses"))
-        ensure_dir(os.path.join(experiment_run_dir, "analysis"))
-        ensure_dir(os.path.join(experiment_run_dir, "kaggle_data"))
+    ensure_dir(experiment_run_dir)
+    ensure_dir(os.path.join(experiment_run_dir, "worktrees"))
+    ensure_dir(os.path.join(experiment_run_dir, "results"))
+    ensure_dir(os.path.join(experiment_run_dir, "hypotheses"))
+    ensure_dir(os.path.join(experiment_run_dir, "analysis"))
+    ensure_dir(os.path.join(experiment_run_dir, "kaggle_data"))
 
-        print("\n✅ Created directories:")
-        for root, dirs, files in os.walk(experiment_run_dir):
-            level = root.replace(experiment_run_dir, '').count(os.sep)
-            indent = ' ' * 2 * level
-            print(f"{indent}{os.path.basename(root)}/")
-            subindent = ' ' * 2 * (level + 1)
-            for d in dirs:
-                print(f"{subindent}{d}/")
+    print("\n✅ Created directories:")
+    for root, dirs, files in os.walk(experiment_run_dir):
+        level = root.replace(experiment_run_dir, '').count(os.sep)
+        indent = ' ' * 2 * level
+        print(f"{indent}{os.path.basename(root)}/")
+        subindent = ' ' * 2 * (level + 1)
+        for d in dirs:
+            print(f"{subindent}{d}/")
 
     print()
 
     # Wait a moment to ensure different timestamp
     time.sleep(2)
 
-    print("2. Testing DRY-RUN mode (no directory creation)")
-    print("-" * 40)
-
-    # Simulate dry-run mode
-    dry_run = True
-    timestamp2 = datetime.now().strftime("%Y%m%d_%H%M%S")
-    experiment_run_dir2 = os.path.join(experiments_root, competition_name, timestamp2)
-
-    print(f"Competition: {competition_name}")
-    print(f"Timestamp: {timestamp2}")
-    print(f"Would create: {experiment_run_dir2}")
-
-    if dry_run:
-        print("✅ DRY-RUN: No directories created")
-
-        # Verify no directory was created
-        if not os.path.exists(experiment_run_dir2):
-            print("✅ Confirmed: Directory does not exist")
-        else:
-            print("❌ ERROR: Directory should not exist in dry-run mode")
-
     print()
-    print("3. Testing multiple competitions")
+    print("2. Testing multiple competitions")
     print("-" * 40)
 
     competitions = ["titanic", "house-prices", "digit-recognizer"]

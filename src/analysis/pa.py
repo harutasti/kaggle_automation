@@ -21,9 +21,8 @@ class PerformanceAnalyzer(BaseComponent):
 
         ensure_dir(self.analysis_dir)
 
-        # Codex configuration
-        self.use_codex = config.get("pa_codex_enabled", False)
-        self.dry_run = config.get("dry_run", False)
+        # Codex configuration driven by simulation_mode
+        self.use_codex = not config.get("simulation_mode", False)
         self.max_iterations = config.get("max_iterations", 3)
         self.prompt_filler = PromptFiller(config)
         self.competition_name = config.get("kaggle_competition_name", "unknown")
@@ -122,7 +121,7 @@ class PerformanceAnalyzer(BaseComponent):
         )
 
         # If Codex is enabled, perform deep analysis
-        if self.use_codex and not self.dry_run:
+        if self.use_codex:
             try:
                 self.logger.info("Performing deep analysis with Codex...")
                 codex_insights = self._analyze_with_codex(iteration, results, analysis, official_scores)
@@ -194,7 +193,6 @@ class PerformanceAnalyzer(BaseComponent):
                 output_dir=self.worktrees_dir,  # Run in worktrees/ for file access
                 iteration=iteration,
                 codex_responses_dir=codex_responses_dir,
-                dry_run=self.dry_run,
                 timeout=self.config.get("pa_codex_timeout", 180)
             )
 

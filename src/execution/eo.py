@@ -23,17 +23,15 @@ class ExperimentOrchestrator(BaseComponent):
         self.experiment_run_dir = config.get("experiment_run_dir", config.get("experiments_base_dir", "./experiments"))
         self.worktree_base_dir = os.path.abspath(os.path.join(self.experiment_run_dir, "worktrees"))
         self.wca_simulator_script = os.path.abspath(os.path.join(os.path.dirname(__file__), 'wca_simulator.py'))
-        self.dry_run = config.get("dry_run", False)
+        self.simulation_mode = config.get("simulation_mode", False)
         ensure_dir(self.worktree_base_dir)
 
         self.repo = self._get_git_repo()
         self.active_processes: Dict[str, Tuple[subprocess.Popen, str]] = {} # {exp_id: (process, worktree_path)}
 
-        # Execution mode: 'simulation' or 'codex'
-        self.execution_mode = config.get("execution_mode", "simulation")
+        # Execution mode derives from simulation_mode
         self.codex_launcher = None
-
-        if self.execution_mode == "codex":
+        if not self.simulation_mode:
             self.logger.info("Initializing Codex execution mode")
             self.codex_launcher = CodexExperimentLauncher(config)
         else:
@@ -89,6 +87,57 @@ class ExperimentOrchestrator(BaseComponent):
         except Exception as e:
             self.logger.error(f"Error during stale worktree cleanup: {e}")
 
+    def _ensure_uv_available(self):
+        """Ensure uv is installed; attempt npm-based install if missing (install npm first if needed)."""
+        if shutil.which("uv"):
+            return
+
+        self.logger.warning("uv command not found. Attempting to install via npm.")
+        if not shutil.which("npm"):
+            self.logger.info("npm is not available. Attempting to install npm first.")
+            self._install_npm()
+
+        if not shutil.which("npm"):
+            raise RuntimeError("npm is unavailable; please install Node.js/npm to allow uv installation.")
+
+        install_cmd = ["npm", "install", "-g", "uv"]
+        try:
+            result = subprocess.run(install_cmd, capture_output=True, text=True, check=False)
+            if result.returncode != 0:
+                self.logger.error(f"npm install -g uv failed: {result.stderr}")
+                raise RuntimeError("uv installation via npm failed.")
+        except Exception as e:
+            raise RuntimeError(f"Failed to install uv via npm: {e}") from e
+
+        if not shutil.which("uv"):
+            raise RuntimeError("uv installation attempted but uv is still unavailable. Please install uv manually.")
+
+        self.logger.info("uv installed successfully via npm.")
+
+    def _install_npm(self):
+        """Attempt to install npm using common package managers."""
+        installers = []
+        if shutil.which("apt-get"):
+            installers.append(["apt-get", "update"])
+            installers.append(["apt-get", "install", "-y", "npm"])
+        elif shutil.which("yum"):
+            installers.append(["yum", "install", "-y", "npm"])
+        elif shutil.which("brew"):
+            installers.append(["brew", "install", "npm"])
+        else:
+            self.logger.error("No supported package manager found to install npm.")
+            return
+
+        for cmd in installers:
+            try:
+                result = subprocess.run(cmd, capture_output=True, text=True, check=False)
+                if result.returncode != 0:
+                    self.logger.warning(f"Command {' '.join(cmd)} failed: {result.stderr}")
+                    # Continue attempting remaining commands
+                else:
+                    self.logger.info(f"Command {' '.join(cmd)} succeeded.")
+            except Exception as e:
+                self.logger.warning(f"Failed to run {' '.join(cmd)}: {e}")
 
     def launch_experiments(self, hypotheses: List[ExperimentHypothesis]) -> Dict[str, any]:
         """Launch WAA simulator or Codex processes in parallel for each hypothesis.
@@ -114,40 +163,10 @@ class ExperimentOrchestrator(BaseComponent):
         # Log GPU allocation summary
         self.logger.info(self.gpu_allocator.get_allocation_summary(total_waas))
 
+        use_codex_execution = not self.simulation_mode
         processes_to_start = []
-
-        # Dry-run: simulate full lifecycle without external commands
-        if self.dry_run:
-            ensure_dir(self.worktree_base_dir)
-            for hypothesis in hypotheses:
-                exp_id = hypothesis.experiment_id
-                worktree_path = os.path.join(self.worktree_base_dir, exp_id)
-                ensure_dir(worktree_path)
-                # Create minimal artifacts
-                done_file = os.path.join(worktree_path, f"DONE_{exp_id}")
-                result_file = os.path.join(worktree_path, f"result_{exp_id}.json")
-                submission_file = os.path.join(worktree_path, f"submission_{exp_id}.csv")
-                log_file = os.path.join(worktree_path, f"waa_{exp_id}.log")
-                with open(done_file, "w") as f:
-                    f.write("SUCCESS")
-                with open(result_file, "w") as f:
-                    json.dump({"score": 0.5, "status": "DRY_RUN"}, f, indent=2)
-                with open(submission_file, "w") as f:
-                    f.write("id,prediction\n1,0.5\n2,0.5\n")
-                with open(log_file, "w") as f:
-                    f.write("DRY-RUN: simulated WAA execution log\n")
-                try:
-                    self.session_manager.create_status_file(worktree_path, exp_id)
-                except Exception:
-                    pass
-                self.active_processes[exp_id] = (None, worktree_path)
-                launched_ids.append(exp_id)
-            self._log_end(method_name, result=f"DRY-RUN: Simulated {len(launched_ids)}/{len(hypotheses)} processes.")
-            return {
-                'launched': launched_ids,
-                'failed': failed_launches,
-                'total': len(hypotheses)
-            }
+        # Ensure dependency manager is present before syncing environments
+        self._ensure_uv_available()
         for hypothesis in hypotheses:
             exp_id = hypothesis.experiment_id
             worktree_path = os.path.join(self.worktree_base_dir, exp_id)
@@ -171,6 +190,16 @@ class ExperimentOrchestrator(BaseComponent):
                         self.logger.info(f"Copied kaggle_data to worktree: {worktree_path}")
                     except Exception as copy_error:
                         self.logger.warning(f"Failed to copy kaggle_data to worktree: {copy_error}")
+
+                # Copy crawler data to worktree if available
+                crawler_src = os.path.join("kaggle_competitions", self.config.get("kaggle_competition_name", ""))
+                worktree_crawler = os.path.join(worktree_path, "kaggle_competitions", self.config.get("kaggle_competition_name", ""))
+                if os.path.exists(crawler_src) and not os.path.exists(worktree_crawler):
+                    try:
+                        shutil.copytree(crawler_src, worktree_crawler, dirs_exist_ok=True)
+                        self.logger.info(f"Copied crawler data to worktree: {worktree_path}")
+                    except Exception as copy_error:
+                        self.logger.warning(f"Failed to copy crawler data to worktree: {copy_error}")
 
                 # Copy experiment pyproject.toml for uv environment
                 experiment_pyproject = self.config.get("experiment_pyproject_path", "config/experiment_pyproject.toml")
@@ -197,6 +226,17 @@ class ExperimentOrchestrator(BaseComponent):
                         self.logger.info(f"Copied uv.lock to worktree: {worktree_path}")
                     except Exception as e:
                         self.logger.warning(f"Failed to copy uv.lock: {e}")
+
+                # Copy the per-experiment task markdown into the worktree
+                task_src = hypothesis.task_markdown_path
+                task_dst = os.path.join(worktree_path, os.path.basename(task_src))
+                try:
+                    shutil.copy2(task_src, task_dst)
+                    hypothesis.task_markdown_path = task_dst  # ensure execution uses the local copy
+                    self.logger.info(f"Copied task markdown for {exp_id} to worktree")
+                except Exception as copy_error:
+                    self.logger.error(f"Failed to copy task markdown for {exp_id}: {copy_error}")
+                    raise
 
                 # Run uv sync to install dependencies
                 try:
@@ -263,7 +303,7 @@ class ExperimentOrchestrator(BaseComponent):
                                 f"gpu_count={gpu_allocation.gpu_count}")
 
                 # 2. Launch per execution mode
-                if self.execution_mode == "codex":
+                if use_codex_execution:
                     # Codex mode: use codex exec with GPU env vars
                     process = self._launch_codex_experiment(hypothesis, worktree_path, exp_id, env=env, gpu_allocation=gpu_allocation)
                 else:
@@ -293,7 +333,7 @@ class ExperimentOrchestrator(BaseComponent):
         # Register processes in bulk
         for process, exp_id, worktree_path in processes_to_start:
              self.active_processes[exp_id] = (process, worktree_path)
-             self.logger.info(f"Launched {'Codex' if self.execution_mode == 'codex' else 'WAA simulator'} process for experiment {exp_id} (PID: {process.pid})")
+             self.logger.info(f"Launched {'Codex' if use_codex_execution else 'WAA simulator'} process for experiment {exp_id} (PID: {process.pid})")
 
         # Log summary
         if failed_launches:
@@ -393,11 +433,6 @@ Please execute the experiment exactly as described above. Ensure you:
 
     def check_running_experiments(self) -> List[str]:
         """Check running experiments with status-aware completion detection."""
-        if self.dry_run:
-            completed = list(self.active_processes.keys())
-            self.active_processes = {}
-            return completed
-
         completed_ids = []
         still_active_processes = {}
         sessions_needing_resume = []
@@ -628,7 +663,7 @@ Please execute the experiment exactly as described above. Ensure you:
 
     def _save_codex_jsonl_output(self, exp_id: str, process: subprocess.Popen, worktree_path: str):
         """Save JSONL output from completed Codex process to worktree directory."""
-        if self.execution_mode != "codex" or process is None:
+        if self.simulation_mode or process is None:
             return  # Only for Codex mode
 
         try:
@@ -648,10 +683,6 @@ Please execute the experiment exactly as described above. Ensure you:
         method_name = "cleanup_worktree"
         self._log_start(method_name, exp_id=exp_id, path=worktree_path)
         try:
-            if self.dry_run:
-                remove_dir(worktree_path)
-                self._log_end(method_name)
-                return
             # Prune Git worktree metadata first
             self.repo.git.worktree('prune')
             # Remove the physical directory

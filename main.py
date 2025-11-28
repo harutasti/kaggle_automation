@@ -27,23 +27,14 @@ def main():
         default=False,
         help="Skip all confirmation prompts (run in automatic mode)"
     )
-    parser.add_argument(
-        "--dry-run",
-        action="store_true",
-        default=False,
-        help="Run in dry-run mode (skip actual Codex executions)"
-    )
     args = parser.parse_args()
 
     config_file = args.config
     skip_confirmations = args.skip_confirmations
-    dry_run = args.dry_run
 
     print(f"Starting AutoKaggle with config: {config_file}")
     if skip_confirmations:
         print("Running in automatic mode (skipping all confirmations)")
-    if dry_run:
-        print("Running in dry-run mode (skipping Codex executions)")
 
     try:
         with open(config_file, 'r', encoding='utf-8') as f:
@@ -74,7 +65,6 @@ def main():
 
     # Add command-line flags to config
     config['skip_confirmations'] = skip_confirmations
-    config['dry_run'] = dry_run
 
     # Get competition name and create timestamped directory
     competition_name = config.get("kaggle_competition_name", "unknown")
@@ -90,8 +80,8 @@ def main():
     config['experiment_run_dir'] = experiment_run_dir
     config['timestamp'] = timestamp
 
-    # Create directories even in dry-run to mirror real structure
-    logger.info(f"{'DRY-RUN ' if dry_run else ''}Creating experiment directories at: {experiment_run_dir}")
+    # Create run directories up front
+    logger.info(f"Creating experiment directories at: {experiment_run_dir}")
     ensure_dir(experiment_run_dir)
     ensure_dir(os.path.join(experiment_run_dir, "worktrees"))
     ensure_dir(os.path.join(experiment_run_dir, "results"))

@@ -15,16 +15,14 @@ from rich.text import Text
 class UserConfirmation:
     """Handles user confirmation prompts with rich formatting."""
 
-    def __init__(self, skip_confirmations: bool = False, dry_run: bool = False):
+    def __init__(self, skip_confirmations: bool = False):
         """
         Initialize the user confirmation handler.
 
         Args:
             skip_confirmations: If True, skip all confirmation prompts
-            dry_run: If True, indicate dry-run mode in prompts
         """
         self.skip_confirmations = skip_confirmations
-        self.dry_run = dry_run
         self.console = Console()
 
     def confirm_action(
@@ -71,11 +69,6 @@ class UserConfirmation:
             content.append("")
             content.append(Text("⚠️  Warning:", style="bold yellow"))
             content.append(Text(warning, style="yellow"))
-
-        # Add dry-run notice if applicable
-        if self.dry_run:
-            content.append("")
-            content.append(Text("🔧 DRY-RUN MODE: No actual execution will occur", style="blue"))
 
         # Create panel
         panel = Panel(

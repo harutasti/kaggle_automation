@@ -1,5 +1,7 @@
 # Codex Integration Guide
 
+> NOTE: References to `execution_mode`/`execution_modes` in this guide are legacy. The current code uses a single `simulation_mode` flag (True = simulator, False = Codex) for all components.
+
 This guide explains how to use the new Codex integration for AutoKaggler.
 
 ## Overview
@@ -120,7 +122,6 @@ result = launcher.launch_experiment(
 **Key Settings**:
 ```json
 {
-  "execution_mode": "codex",      // Use real Codex (vs "simulation")
   "simulation_mode": false,        // Disable simulator
   "wca_per_iteration": 1,         // Start with 1 agent
   "max_iterations": 2,            // Start with 2 iterations
@@ -357,7 +358,6 @@ Codex tracks usage in: `experiments/codex_usage.json`
 
 ```json
 {
-  "execution_mode": "simulation",
   "simulation_mode": true
 }
 ```
@@ -366,7 +366,6 @@ Codex tracks usage in: `experiments/codex_usage.json`
 
 ```json
 {
-  "execution_mode": "codex",
   "simulation_mode": false,
   "codex": {"enabled": true}
 }
@@ -380,7 +379,7 @@ To integrate with Experiment Orchestrator:
 # src/execution/eo.py
 
 def _launch_experiment(self, hypothesis):
-    if self.config.get("execution_mode") == "codex":
+    if not self.config.get("simulation_mode", False):
         return self._launch_with_codex(hypothesis)
     else:
         return self._launch_with_simulator(hypothesis)

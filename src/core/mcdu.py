@@ -27,8 +27,7 @@ class MasterControllerDecisionUnit(BaseComponent):
 
         # Initialize user confirmation handler
         self.user_confirm = UserConfirmation(
-            skip_confirmations=self.config.get("skip_confirmations", False),
-            dry_run=self.config.get("dry_run", False)
+            skip_confirmations=self.config.get("skip_confirmations", False)
         )
 
         # Initialize components
@@ -99,6 +98,16 @@ class MasterControllerDecisionUnit(BaseComponent):
                 self.logger.info(f"Copied kaggle_data to hypotheses/ for KSE access")
             except Exception as copy_error:
                 self.logger.warning(f"Failed to copy kaggle_data to hypotheses: {copy_error}")
+
+        # Copy crawler data to hypotheses for Codex/KSE context
+        crawler_src = os.path.join("kaggle_competitions", self.kim.competition_name)
+        hypotheses_crawler_data = os.path.join(experiment_run_dir, "hypotheses", "crawler_data")
+        if os.path.exists(crawler_src):
+            try:
+                shutil.copytree(crawler_src, hypotheses_crawler_data, dirs_exist_ok=True)
+                self.logger.info("Copied crawler data to hypotheses/ for KSE access")
+            except Exception as copy_error:
+                self.logger.warning(f"Failed to copy crawler data to hypotheses: {copy_error}")
 
         # 2. Main loop
         while not self._should_stop():
