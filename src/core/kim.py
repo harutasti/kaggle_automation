@@ -5,6 +5,7 @@ import zipfile
 import subprocess
 import sys
 import json
+from pathlib import Path
 from typing import Optional, List, Dict, Any
 
 from .base_component import BaseComponent
@@ -34,6 +35,17 @@ class KaggleInterfaceManager(BaseComponent):
     def _authenticate_kaggle(self):
         """Authenticate with the Kaggle API."""
         try:
+            # Prefer project-root kaggle.json if present
+            project_root = Path(__file__).resolve().parents[2]
+            project_kaggle = project_root / "kaggle.json"
+            if not os.environ.get("KAGGLE_CONFIG_DIR") and project_kaggle.exists():
+                os.environ["KAGGLE_CONFIG_DIR"] = str(project_root)
+                self.logger.info(f"Using kaggle.json from project root: {project_kaggle}")
+                try:
+                    os.chmod(project_kaggle, 0o600)
+                except Exception as chmod_err:
+                    self.logger.warning(f"Could not set permissions on {project_kaggle}: {chmod_err}")
+
             # Import here to avoid authentication at module import time
             from kaggle.api.kaggle_api_extended import KaggleApi
             api = KaggleApi()

@@ -60,6 +60,41 @@ class ResultAggregatorDatabase(BaseComponent):
 
         write_json(serializable_data, self.manifest_file)
 
+    def _extract_score(self, result_data: dict) -> Optional[float]:
+        """
+        Derive a numeric score from result JSON when 'score' is missing.
+
+        Tries common patterns emitted by WAAs:
+        - result_data["score"]
+        - result_data["cv"]["mean_accuracy"]
+        - result_data["cv_results"]["cv_metrics"][lightgbm_accuracy_mean|blend_accuracy|stack_accuracy]
+        - result_data["base_cv_accuracy_mean"] (pseudo-label pipelines)
+        """
+        if not result_data:
+            return None
+
+        # Direct score
+        if "score" in result_data:
+            return result_data.get("score")
+
+        # CV mean accuracy
+        cv = result_data.get("cv") or {}
+        if "mean_accuracy" in cv:
+            return cv.get("mean_accuracy")
+
+        # Ensemble/stacks
+        cv_results = result_data.get("cv_results") or {}
+        cv_metrics = cv_results.get("cv_metrics") or {}
+        for key in ("accuracy_mean", "lightgbm_accuracy_mean", "blend_accuracy", "stack_accuracy"):
+            if key in cv_metrics:
+                return cv_metrics.get(key)
+
+        # Pseudo-label pipeline
+        if "base_cv_accuracy_mean" in result_data:
+            return result_data.get("base_cv_accuracy_mean")
+
+        return None
+
     def collect_result(self, exp_id: str, worktree_path: str, hypothesis: Optional[ExperimentHypothesis] = None) -> Optional[ExperimentResult]:
         """Collect results from a worktree and save them to the manifest.
 
@@ -90,7 +125,7 @@ class ResultAggregatorDatabase(BaseComponent):
 
 
         result_data = read_json(result_json_path)
-        score = result_data.get("score") if result_data else None
+        score = self._extract_score(result_data) if result_data else None
         error_message = None
         if status != "SUCCESS":
              if os.path.exists(error_log_path):
@@ -112,11 +147,16 @@ class ResultAggregatorDatabase(BaseComponent):
         # Always copy the WAA log
         collected_log_path_relative = os.path.join(exp_id, os.path.basename(waa_log_path))
         collected_log_path_absolute = os.path.join(self.results_base_dir, collected_log_path_relative)
-        if os.path.exists(waa_log_path):
-            copy_file(waa_log_path, collected_log_path_absolute)
-        else:
-             self.logger.warning(f"WAA log file not found: {waa_log_path}")
-             collected_log_path_relative = None  # If log missing
+        log_candidates = [waa_log_path, os.path.join(os.path.dirname(waa_log_path), "logs", os.path.basename(waa_log_path))]
+        copied_log = False
+        for candidate in log_candidates:
+            if os.path.exists(candidate):
+                copy_file(candidate, collected_log_path_absolute)
+                copied_log = True
+                break
+        if not copied_log:
+            self.logger.warning(f"WAA log file not found (checked: {log_candidates})")
+            collected_log_path_relative = None  # If log missing
 
         # Other potential outputs (submission, model, etc.)
         # First try exact matches for expected file names

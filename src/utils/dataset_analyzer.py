@@ -7,6 +7,7 @@ for filling KSE prompt placeholders.
 
 import os
 import json
+import warnings
 import pandas as pd
 import numpy as np
 from typing import Dict, Any, Optional, List, Tuple
@@ -194,21 +195,25 @@ class DatasetAnalyzer:
         datetime_keywords = ['date', 'time', 'year', 'month', 'day', 'hour', 'minute']
         col_lower = col_name.lower()
 
-        # Check column name
-        if any(keyword in col_lower for keyword in datetime_keywords):
-            return True
+        # Quick heuristic on column name
+        name_has_datetime = any(keyword in col_lower for keyword in datetime_keywords)
 
-        # Try parsing a sample
         if self.train_data is not None:
             try:
-                sample = self.train_data[col_name].dropna().head(10)
+                sample = self.train_data[col_name].dropna().head(50)
                 if len(sample) > 0:
-                    pd.to_datetime(sample, errors='coerce')
-                    return True
-            except:
-                pass
+                    with warnings.catch_warnings():
+                        warnings.simplefilter("ignore", UserWarning)
+                        parsed = pd.to_datetime(sample, errors='coerce', infer_datetime_format=True)
+                    parsed_ratio = parsed.notna().mean()
+                    if parsed_ratio > 0.5:
+                        return True
+                    # If name suggests datetime but parsing failed, treat as non-datetime to avoid misclassification
+                    return False
+            except Exception:
+                return False
 
-        return False
+        return name_has_datetime
 
     def _analyze_target(self) -> Dict[str, Any]:
         """Analyze target variable (if identifiable)."""

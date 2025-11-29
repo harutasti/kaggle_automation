@@ -509,6 +509,10 @@ class SessionManager:
         if not ts_str:
             return datetime.now()
 
+        # Handle shell placeholders like "$(date -Iseconds)" by substituting current time
+        if ts_str.startswith("$(") or "$(" in ts_str:
+            return datetime.now()
+
         try:
             # Handle various ISO formats
             if 'T' in ts_str:

@@ -14,6 +14,11 @@ dependencies = [
     "xgboost>=2.0.0",
     "lightgbm>=4.0.0",
     "catboost>=1.2.0",
+    "imbalanced-learn>=0.12.0",
+    "category-encoders>=2.6.0",
+    "statsmodels>=0.14.0",
+    "shap>=0.44.0",
+    "transformers>=4.44,<5",
 
     # Deep Learning (commonly needed)
     "torch>=2.0.0",
