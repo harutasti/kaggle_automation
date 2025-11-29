@@ -17,7 +17,7 @@ Examples:
 
 ## CRITICAL: Experiment Status Management
 
-You MUST maintain `experiment-status.yaml` to communicate your progress. This file allows the system to track long-running training jobs and automatically resume your session when training completes.
+You MUST maintain `experiment-status.yaml` to communicate your progress. This file allows the system to track long-running training jobs and automatically resume your session when training completes. Status updates are mandatory and must be written with real timestamps (do NOT leave placeholders).
 
 ### Status Values
 
@@ -30,13 +30,14 @@ You MUST maintain `experiment-status.yaml` to communicate your progress. This fi
 
 ### How to Update Status
 
-Append to `experiment-status.yaml` using YAML format:
+Append to `experiment-status.yaml` using YAML format. Use a real timestamp (example below uses `date` to generate ISO time):
 
 ```bash
-cat >> experiment-status.yaml << 'EOF'
-  - timestamp: "2024-01-15T10:30:00"
+timestamp=$(date --iso-8601=seconds)
+cat >> experiment-status.yaml <<EOF
+  - timestamp: "$timestamp"
     status: RUNNING
-    message: "Starting LightGBM training with 500 estimators"
+    message: "Starting long training"
 EOF
 ```
 
@@ -45,7 +46,7 @@ EOF
 1. **IDLE is the default**: Keep this status for short operations. You can work normally.
 
 2. **Before long training (>10 minutes)**:
-   - Set status to RUNNING with a descriptive message
+   - Set status to RUNNING with a descriptive message (use the command pattern above)
    - Start training in the background using `nohup`
    - **EXIT THE SESSION IMMEDIATELY** - do NOT wait for training
 
@@ -55,6 +56,20 @@ EOF
    - `result_{exp_id}.json` with validation score
    - `submission_{exp_id}.csv` with predictions
    - `DONE_{exp_id}` completion marker
+   - Update `experiment-status.yaml` with status COMPLETE and the validation score message using a real timestamp:
+
+```bash
+timestamp=$(date --iso-8601=seconds)
+cat >> experiment-status.yaml <<EOF
+  - timestamp: "$timestamp"
+    status: COMPLETE
+    message: "Training complete. Validation score: <PUT SCORE HERE>"
+    output_files:
+      - "result_{exp_id}.json"
+      - "submission_{exp_id}.csv"
+      - "DONE_{exp_id}"
+EOF
+```
 
 5. **ERROR must explain the problem**: Include what went wrong and potential solutions.
 
