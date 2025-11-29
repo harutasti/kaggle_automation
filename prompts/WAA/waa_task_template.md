@@ -17,7 +17,7 @@ Examples:
 
 ## CRITICAL: Experiment Status Management
 
-You MUST maintain `experiment-status.yaml` to communicate your progress. This file allows the system to track long-running training jobs and automatically resume your session when training completes. Status updates are mandatory and must be written with real timestamps (do NOT leave placeholders).
+You MUST maintain `experiment-status.yaml` to communicate your progress. This file allows the system to track long-running training jobs and automatically resume your session when training completes. Status updates are mandatory and must be written with real ISO timestamps (no placeholders or shell literals).
 
 ### Status Values
 
@@ -117,7 +117,7 @@ if [ -f "model.pkl" ] && [ -f "training.log" ]; then
 
     # 3. Update status to COMPLETE
     cat >> experiment-status.yaml << 'EOF'
-  - timestamp: "2024-01-15T12:45:00"
+  - timestamp: "2025-01-15T12:45:00"
     status: COMPLETE
     message: "Training complete. Validation score: 0.8532"
 EOF
@@ -127,7 +127,7 @@ EOF
 else
     # Training failed
     cat >> experiment-status.yaml << 'EOF'
-  - timestamp: "2024-01-15T12:45:00"
+  - timestamp: "2025-01-15T12:45:00"
     status: ERROR
     message: "Training failed - model file not created"
     error_type: "TRAINING_FAILURE"
@@ -142,18 +142,18 @@ fi
 
 ```yaml
 experiment_id: "iter0_exp1_abc123"
-created_at: "2024-01-15T10:00:00"
+created_at: "2025-01-15T10:00:00"
 statuses:
-  - timestamp: "2024-01-15T10:00:00"
+  - timestamp: "2025-01-15T10:00:00"
     status: IDLE
     message: "Initial state"
 
-  - timestamp: "2024-01-15T10:30:00"
+  - timestamp: "2025-01-15T10:30:00"
     status: RUNNING
     message: "Starting XGBoost training"
     expected_duration_minutes: 120
 
-  - timestamp: "2024-01-15T12:45:00"
+  - timestamp: "2025-01-15T12:45:00"
     status: COMPLETE
     message: "Training complete. Score: 0.8532"
     output_files:
@@ -166,3 +166,10 @@ statuses:
 ---
 
 {task_content}
+
+## Outputs & Files (MANDATORY)
+
+- `result_{exp_id}.json` with a top-level `score` field (float) representing the primary CV metric, plus any detailed metrics.
+- `submission_{exp_id}.csv` (exact name) with predictions in competition format.
+- Log key steps to root-level `waa_{exp_id}.log` (copy here if generated elsewhere).
+- Update `experiment-status.yaml` with RUNNING/COMPLETE entries (real ISO timestamps) and then create `DONE_{exp_id}` once all outputs are ready.
