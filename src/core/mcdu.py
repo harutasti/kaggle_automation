@@ -49,6 +49,8 @@ class MasterControllerDecisionUnit(BaseComponent):
         self.iterations_without_improvement = 0
         self.stop_reason: Optional[str] = None
         self.pending_cleanup: Dict[str, str] = {}  # {exp_id: worktree_path} for delayed cleanup
+        self.iteration_analysis_results: Dict[int, AnalysisResult] = {}
+        self.iteration_official_scores: Dict[int, Dict[str, float]] = {}
 
         # Load stop conditions
         stop_config = self.config.get("stop_condition", {})
@@ -219,9 +221,9 @@ class MasterControllerDecisionUnit(BaseComponent):
                                 score_result = self.kim.get_submission_score(wait_timeout=120)
                                 if score_result and score_result.get("score"):
                                     official_scores[result.experiment_id] = score_result["score"]
-                                    self.logger.info(f"Official score for {result.experiment_id}: {score_result['score']}")
-                                else:
-                                    self.logger.warning(f"Could not get official score for {result.experiment_id}")
+                            self.logger.info(f"Official score for {result.experiment_id}: {score_result['score']}")
+                        else:
+                            self.logger.warning(f"Could not get official score for {result.experiment_id}")
                             else:
                                 self.logger.error(f"Failed to submit {result.experiment_id}")
                         else:
@@ -230,6 +232,7 @@ class MasterControllerDecisionUnit(BaseComponent):
                     self.logger.info("User skipped Kaggle submissions for this iteration")
 
             # 2e. Performance analysis (with official scores)
+            self._log_waa_results_to_terminal(iteration_results, official_scores)
             if iteration_results:
                 # Confirm PA analysis
                 if not self.user_confirm.confirm_pa_analysis(self.current_iteration, len(iteration_results)):
@@ -242,10 +245,13 @@ class MasterControllerDecisionUnit(BaseComponent):
                         iteration_results,
                         official_scores=official_scores
                     )
+                    if analysis_result:
+                        self.iteration_analysis_results[self.current_iteration] = analysis_result
+                        self.iteration_official_scores[self.current_iteration] = official_scores
                     self.user_confirm.show_success("Performance analysis completed")
-            else:
-                self.logger.warning("No results to analyze for this iteration")
-                analysis_result = None
+                else:
+                    self.logger.warning("No results to analyze for this iteration")
+                    analysis_result = None
 
             # 2f. Cleanup worktrees (after PA has finished analyzing)
             if self.pending_cleanup:
@@ -310,15 +316,26 @@ class MasterControllerDecisionUnit(BaseComponent):
         if self.current_iteration == 0:
             return self.kse.generate_initial_hypotheses(self.competition_info, self.wca_per_iteration)
         else:
-            # Pass prior analysis and all past results
             last_iteration = self.current_iteration - 1
-            last_analysis = self.pa.analyze_results(last_iteration, self.all_results.get(last_iteration, []))  # Re-analyze or use saved
+            # Use stored analysis and official scores from the prior iteration if available
+            last_analysis = self.iteration_analysis_results.get(last_iteration)
+            if last_analysis is None:
+                last_analysis = self.pa.analyze_results(
+                    last_iteration,
+                    self.all_results.get(last_iteration, []),
+                    official_scores=self.iteration_official_scores.get(last_iteration, {})
+                )
+                if last_analysis:
+                    self.iteration_analysis_results[last_iteration] = last_analysis
+
             all_past_results = [res for iter_res in self.all_results.values() for res in iter_res]
+            prior_official_scores = self.iteration_official_scores.get(last_iteration, {})
             return self.kse.generate_next_hypotheses(self.competition_info,
                                                       self.current_iteration,
                                                       self.wca_per_iteration,
                                                       last_analysis,
-                                                      all_past_results)
+                                                      all_past_results,
+                                                      official_scores=prior_official_scores)
 
     def _update_overall_best(self, analysis_result: AnalysisResult):
         """Update global best score and track iterations without improvement."""
@@ -341,6 +358,20 @@ class MasterControllerDecisionUnit(BaseComponent):
              if initial_best_score is not None:  # Not the first iteration
                  self.iterations_without_improvement += 1
                  self.logger.info(f"No valid score in this iteration. Iterations without improvement: {self.iterations_without_improvement}")
+
+    def _log_waa_results_to_terminal(self, iteration_results: List[ExperimentResult],
+                                     official_scores: Dict[str, float]) -> None:
+        """Print a compact summary of WAA results (including official scores) to the terminal."""
+        if not iteration_results:
+            self.logger.info("No WAA results to display for this iteration.")
+            return
+
+        self.logger.info("WAA Results Summary (cv vs official):")
+        for res in iteration_results:
+            official = official_scores.get(res.experiment_id)
+            official_str = f"{official:.4f}" if official is not None else "N/A"
+            cv_str = f"{res.score:.4f}" if res.score is not None else "N/A"
+            self.logger.info(f"  - {res.experiment_id}: strategy={res.strategy_name}, cv_score={cv_str}, official_score={official_str}, status={res.status}")
 
     def _find_submission_file(self, result: ExperimentResult) -> Optional[str]:
         """Find the submission file path for an experiment result."""

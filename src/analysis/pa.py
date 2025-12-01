@@ -2,6 +2,7 @@ import os
 from typing import List, Optional, Dict, Any
 import datetime
 import json
+from pathlib import Path
 
 from ..core.base_component import BaseComponent
 from ..data_models import ExperimentResult, AnalysisResult
@@ -175,7 +176,7 @@ class PerformanceAnalyzer(BaseComponent):
         """
         try:
             # Prepare the prompt
-            prompt = self._prepare_pa_prompt(iteration, results, basic_analysis)
+            prompt = self._prepare_pa_prompt(iteration, results, basic_analysis, official_scores or {})
 
             if not prompt:
                 self.logger.warning("Could not prepare PA prompt")
@@ -187,13 +188,19 @@ class PerformanceAnalyzer(BaseComponent):
             # Get codex-responses directory for JSONL output
             codex_responses_dir = os.path.join(self.experiment_run_dir, "codex-responses")
 
+            use_resume = iteration > 0
+            run_label = "initial" if iteration == 0 else "resume"
+            resume_prompt = prompt if use_resume else None
+
             codex_result = execute_codex(
                 mode=CodexMode.PA,
                 results_data=prompt,  # PA expects results_data, not prompt
                 output_dir=self.worktrees_dir,  # Run in worktrees/ for file access
                 iteration=iteration,
                 codex_responses_dir=codex_responses_dir,
-                timeout=self.config.get("pa_codex_timeout", 180)
+                timeout=self.config.get("pa_codex_timeout", 180),
+                resume_prompt=resume_prompt,
+                run_label=run_label
             )
 
             if not codex_result.success:
@@ -220,7 +227,8 @@ class PerformanceAnalyzer(BaseComponent):
             return None
 
     def _prepare_pa_prompt(self, iteration: int, results: List[ExperimentResult],
-                          basic_analysis: AnalysisResult) -> Optional[str]:
+                          basic_analysis: AnalysisResult,
+                          official_scores: Optional[Dict[str, float]]) -> Optional[str]:
         """
         Prepare the PA prompt for Codex analysis.
 
@@ -233,76 +241,41 @@ class PerformanceAnalyzer(BaseComponent):
             Filled prompt string or None if preparation fails
         """
         try:
-            # Load PA prompt template
-            prompt_path = os.path.join("prompts", "PA", "pa_analysis_prompt.md")
-            if not os.path.exists(prompt_path):
-                self.logger.error(f"PA prompt template not found: {prompt_path}")
-                return None
+            prompts_dir = Path("prompts") / "PA"
+            if iteration == 0:
+                prompt_path = prompts_dir / "pa_prompt_first_run.md"
+            else:
+                prompt_path = prompts_dir / "pa_prompt_resume.md"
 
-            with open(prompt_path, 'r') as f:
-                prompt_template = f.read()
+            if not prompt_path.exists():
+                prompt_path = Path("prompts") / "PA" / "pa_analysis_prompt.md"
+                if not prompt_path.exists():
+                    self.logger.error(f"PA prompt template not found: {prompt_path}")
+                    return None
 
-            # Prepare experiment results table
-            table_rows = []
-            for r in results:
-                key_params = json.dumps(r.parameters) if r.parameters else "{}"
-                # Truncate long parameter strings
-                if len(key_params) > 100:
-                    key_params = key_params[:97] + "..."
+            prompt_template = prompt_path.read_text(encoding="utf-8")
 
-                row = f"| {r.experiment_id} | {r.strategy_name} | "
-                row += f"{r.score:.4f}" if r.score else "N/A"
-                row += f" | {r.status} | {r.execution_time_seconds:.1f} | "
-                row += "N/A | "  # Memory placeholder
-                row += f"{key_params} |"
-                table_rows.append(row)
-
-            experiment_results_table = "\n".join(table_rows)
+            waa_results_block = self._build_waa_results_block(results, official_scores)
 
             # Calculate statistics
             successful_results = [r for r in results if r.status == "SUCCESS" and r.score is not None]
             failed_results = [r for r in results if r.status != "SUCCESS"]
             scores = [r.score for r in successful_results] if successful_results else []
 
-            # Prepare detailed logs (simplified for now)
-            detailed_logs = []
-            for r in results[:5]:  # Show first 5 experiments in detail
-                log_entry = f"### Experiment: {r.experiment_id}\n"
-                log_entry += f"- Strategy: {r.strategy_name}\n"
-                log_entry += f"- Score: {r.score:.4f}\n" if r.score else "- Score: N/A\n"
-                log_entry += f"- Status: {r.status}\n"
-                log_entry += f"- Runtime: {r.execution_time_seconds:.1f}s\n"
-                if r.error_message:
-                    log_entry += f"- Error: {r.error_message}\n"
-                detailed_logs.append(log_entry)
+            summary_lines = [
+                f"- Iteration: {iteration}",
+                f"- Best CV score: {basic_analysis.best_score:.4f}" if basic_analysis.best_score else "- Best CV score: N/A",
+                f"- Best experiment: {basic_analysis.best_experiment_id or 'N/A'}",
+                f"- Avg CV score: {sum(scores)/len(scores):.4f}" if scores else "- Avg CV score: N/A",
+                f"- Success rate: {len(successful_results)/len(results)*100:.1f}%" if results else "- Success rate: 0%"
+            ]
+            summary_block = "\n".join(summary_lines)
 
-            # Calculate time remaining (placeholder)
-            time_remaining = "Unknown"  # Would need competition deadline
-
-            # Fill the prompt template
             replacements = {
-                "{num_experiments}": str(len(results)),
-                "{iteration_number}": str(iteration),
-                "{competition_name}": self.competition_name,
-                "{evaluation_metric}": self.evaluation_metric,
-                "{best_score}": f"{basic_analysis.best_score:.4f}" if basic_analysis.best_score else "N/A",
-                "{max_iterations}": str(self.max_iterations),
-                "{time_remaining}": time_remaining,
-                "{experiment_results_table}": experiment_results_table,
-                "{best_experiment_id}": basic_analysis.best_experiment_id or "N/A",
-                "{avg_score}": f"{sum(scores)/len(scores):.4f}" if scores else "N/A",
-                "{worst_score}": f"{min(scores):.4f}" if scores else "N/A",
-                "{score_std}": f"{self._calculate_std(scores):.4f}" if scores else "N/A",
-                "{success_rate}": f"{len(successful_results)/len(results)*100:.1f}" if results else "0",
-                "{num_successful}": str(len(successful_results)),
-                "{num_total}": str(len(results)),
-                "{total_runtime}": f"{sum(r.execution_time_seconds for r in results)/60:.1f}",
-                "{avg_runtime}": f"{sum(r.execution_time_seconds for r in results)/len(results)/60:.1f}" if results else "0",
-                "{failed_experiments_list}": ", ".join([r.experiment_id for r in failed_results]) or "None",
-                "{detailed_experiment_logs}": "\n\n".join(detailed_logs)
+                "<<WAA_RESULTS>>": waa_results_block,
+                "<<SUMMARY_BLOCK>>": summary_block
             }
 
-            # Replace all placeholders
             filled_prompt = prompt_template
             for key, value in replacements.items():
                 filled_prompt = filled_prompt.replace(key, str(value))
@@ -320,3 +293,21 @@ class PerformanceAnalyzer(BaseComponent):
         mean = sum(values) / len(values)
         variance = sum((x - mean) ** 2 for x in values) / len(values)
         return variance ** 0.5
+
+    def _build_waa_results_block(self, results: List[ExperimentResult],
+                                 official_scores: Optional[Dict[str, float]]) -> str:
+        """Render WAA results (including official scores) as markdown bullets."""
+        if not results:
+            return "No experiments were run in this iteration."
+
+        lines = []
+        for r in results:
+            official = None
+            if official_scores:
+                official = official_scores.get(r.experiment_id)
+            official_str = f"{official:.4f}" if official is not None else "N/A"
+            cv_str = f"{r.score:.4f}" if r.score is not None else "N/A"
+            lines.append(
+                f"- {r.experiment_id} | strategy={r.strategy_name} | cv_score={cv_str} | official_score={official_str} | status={r.status} | params={json.dumps(r.parameters) if r.parameters else '{}'}"
+            )
+        return "\n".join(lines)

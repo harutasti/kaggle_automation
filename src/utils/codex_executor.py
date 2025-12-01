@@ -21,6 +21,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Optional, List, Dict, Any, Literal
 from enum import Enum
+import uuid
 
 
 class CodexMode(Enum):
@@ -100,6 +101,18 @@ def execute_codex_experiment(
         done_file.write_text("SUCCESS", encoding="utf-8")
         log_file.write_text("DRY-RUN: simulated execution log.\n", encoding="utf-8")
         output_file.write_text("DRY-RUN: Codex output placeholder.\n", encoding="utf-8")
+
+        # Save prompt for debugging
+        stdin_input = f"""Your Task:
+DRY-RUN placeholding task for {experiment_id}
+"""
+        _save_prompt_for_debug(
+            prompt_text=stdin_input,
+            mode="WAA",
+            iteration=_parse_iteration_from_experiment_id(experiment_id),
+            experiment_id=experiment_id,
+            anchor_path=worktree_path
+        )
         return CodexResult(
             success=True,
             mode=CodexMode.WAA,
@@ -152,6 +165,14 @@ Please execute the experiment exactly as described above. Ensure you:
 2. Create the DONE_{experiment_id} file when complete
 3. Save predictions to submission_{experiment_id}.csv
 """
+
+    _save_prompt_for_debug(
+        prompt_text=stdin_input,
+        mode="WAA",
+        iteration=_parse_iteration_from_experiment_id(experiment_id),
+        experiment_id=experiment_id,
+        anchor_path=worktree_path
+    )
 
     logger.info(f"Executing Codex for experiment {experiment_id}")
     logger.debug(f"Working directory: {worktree_path}")
@@ -471,6 +492,14 @@ def execute_kse_hypothesis_generation(
 
     # If dry-run, synthesize success only (templates handled by caller)
     if dry_run:
+        _save_prompt_for_debug(
+            prompt_text=prompt_content,
+            mode="KSE",
+            iteration=iteration,
+            experiment_id=None,
+            anchor_path=output_dir,
+            run_label=run_label
+        )
         return CodexResult(
             success=True,
             mode=CodexMode.KSE,
@@ -480,6 +509,15 @@ def execute_kse_hypothesis_generation(
 
     # Use prompt_content as-is; templates are pre-created by caller
     stdin_input = resume_prompt if resume_prompt is not None else prompt_content
+
+    _save_prompt_for_debug(
+        prompt_text=stdin_input,
+        mode="KSE",
+        iteration=iteration,
+        experiment_id=None,
+        anchor_path=output_dir,
+        run_label=run_label
+    )
 
     logger.info(f"Executing KSE for iteration {iteration}")
     start_time = time.time()
@@ -548,7 +586,9 @@ def execute_pa_analysis(
     codex_responses_dir: str | Path | None = None,
     timeout: int = 300,
     dry_run: bool = False,
-    logger: Optional[logging.Logger] = None
+    logger: Optional[logging.Logger] = None,
+    resume_prompt: str | None = None,
+    run_label: str | None = None
 ) -> CodexResult:
     """
     Execute Performance Analysis using Codex.
@@ -573,6 +613,9 @@ def execute_pa_analysis(
     # Ensure output directory exists
     output_dir.mkdir(parents=True, exist_ok=True)
 
+    # Prepare results summary for analysis
+    results_summary = results_data if isinstance(results_data, str) else json.dumps(results_data, indent=2)
+
     # If dry-run, create placeholder analysis artifacts
     if dry_run:
         logger.info(f"DRY-RUN: Simulating PA analysis for iteration {iteration}")
@@ -591,6 +634,14 @@ def execute_pa_analysis(
             "key_insights": ["DRY-RUN placeholder insights"]
         }
         summary_file.write_text(json.dumps(summary_payload, indent=2), encoding="utf-8")
+        _save_prompt_for_debug(
+            prompt_text=resume_prompt if resume_prompt is not None else results_summary,
+            mode="PA",
+            iteration=iteration,
+            experiment_id=None,
+            anchor_path=output_dir,
+            run_label=run_label
+        )
         return CodexResult(
             success=True,
             mode=CodexMode.PA,
@@ -599,11 +650,8 @@ def execute_pa_analysis(
             output_file=str(output_file)
         )
 
-    # Prepare results summary for analysis
-    results_summary = results_data if isinstance(results_data, str) else json.dumps(results_data, indent=2)
-
     # Prepare instruction for Codex
-    stdin_input = f"""You are the Performance Analyzer (PA) for AutoKaggle.
+    stdin_input = resume_prompt if resume_prompt is not None else f"""You are the Performance Analyzer (PA) for AutoKaggle.
 
 Analyze the following experiment results from iteration {iteration}:
 
@@ -659,8 +707,21 @@ Create two output files:
     start_time = time.time()
 
     try:
+        _save_prompt_for_debug(
+            prompt_text=stdin_input,
+            mode="PA",
+            iteration=iteration,
+            experiment_id=None,
+            anchor_path=output_dir,
+            run_label=run_label
+        )
+        cmd = ["codex", "exec", "--skip-git-repo-check"]
+        if resume_prompt:
+            cmd.extend(["resume", "--last"])
+        cmd.append("--json")
+
         proc = subprocess.run(
-            ["codex", "exec", "--skip-git-repo-check", "--json"],
+            cmd,
             input=stdin_input.encode("utf-8"),
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
@@ -675,7 +736,8 @@ Create two output files:
         # Save JSONL output to codex-responses/PA/
         if codex_responses_dir:
             codex_responses_dir_path = Path(codex_responses_dir)
-            jsonl_path = codex_responses_dir_path / "PA" / f"response-{iteration}.jsonl"
+            suffix = run_label if run_label else ("resume" if resume_prompt else "initial")
+            jsonl_path = codex_responses_dir_path / "PA" / f"response-{iteration}-{suffix}.jsonl"
             jsonl_path.parent.mkdir(parents=True, exist_ok=True)
             jsonl_path.write_text(raw_output, encoding="utf-8")
             logger.info(f"Saved JSONL output to {jsonl_path}")
@@ -770,6 +832,58 @@ def execute_codex(
             error=f"Unknown Codex mode: {mode}",
             error_type="INVALID_MODE"
         )
+
+
+def _parse_iteration_from_experiment_id(experiment_id: str) -> Optional[int]:
+    """Extract iteration number from experiment_id like iter2_exp3_xxxx."""
+    match = re.match(r"iter(\d+)_exp", experiment_id)
+    if match:
+        return int(match.group(1))
+    return None
+
+
+def _infer_run_dir(anchor_path: str | Path) -> Optional[Path]:
+    """Given a path inside the run, find the experiment run root (parent of worktrees/hypotheses/etc.)."""
+    p = Path(anchor_path).resolve()
+    for parent in [p] + list(p.parents):
+        if parent.name in {"worktrees", "hypotheses", "analysis", "results", "sessions", "codex-responses"}:
+            return parent.parent
+    return p if p.exists() else None
+
+
+def _save_prompt_for_debug(
+    prompt_text: str,
+    mode: str,
+    iteration: Optional[int],
+    experiment_id: Optional[str],
+    anchor_path: str | Path,
+    run_label: Optional[str] = None
+) -> None:
+    """Persist the actual prompt used for Codex execution for debugging."""
+    try:
+        run_dir = _infer_run_dir(anchor_path)
+        if run_dir is None:
+            return
+
+        prompt_root = run_dir / "prompts" / mode.upper()
+        if iteration is not None:
+            prompt_root = prompt_root / f"iter{iteration}"
+        prompt_root.mkdir(parents=True, exist_ok=True)
+
+        if experiment_id:
+            filename = f"{experiment_id}"
+        else:
+            label = run_label or "prompt"
+            filename = f"iter{iteration}_{label}" if iteration is not None else f"prompt_{label}"
+
+        path = prompt_root / f"{filename}.md"
+        if path.exists():
+            path = prompt_root / f"{filename}_{uuid.uuid4().hex[:6]}.md"
+
+        path.write_text(prompt_text, encoding="utf-8")
+    except Exception:
+        # Debug prompt saving should never break main execution
+        return
 
 
 def build_resume_prompt(exp_id: str, exit_code: int, training_log_tail: str) -> str:

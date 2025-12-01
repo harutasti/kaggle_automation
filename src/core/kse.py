@@ -258,6 +258,40 @@ class KnowledgeStrategyEngine(BaseComponent):
 
         return "\n\n## System-provided quick context\n" + "\n".join(context_lines)
 
+    def _format_waa_results(self,
+                            previous_results: Optional[List[ExperimentResult]],
+                            official_scores: Optional[Dict[str, float]],
+                            current_iteration: int) -> str:
+        """Format WAA results (with official scores) for prompt embedding."""
+        if not previous_results:
+            return "No WAA results available yet."
+
+        latest_iter = current_iteration - 1 if current_iteration > 0 else 0
+        iter_results = [r for r in previous_results if r.iteration == latest_iter] or previous_results
+        lines = []
+        for r in iter_results:
+            official = None
+            if official_scores:
+                official = official_scores.get(r.experiment_id)
+            official_str = f"{official:.4f}" if official is not None else "N/A"
+            score_str = f"{r.score:.4f}" if r.score is not None else "N/A"
+            lines.append(
+                f"- {r.experiment_id} | strategy={r.strategy_name} | cv_score={score_str} | official_score={official_str} | status={r.status}"
+            )
+        return "\n".join(lines) if lines else "No WAA results available yet."
+
+    def _load_pa_analysis_markdown(self, current_iteration: int) -> str:
+        """Load the most recent PA analysis markdown for context."""
+        if current_iteration <= 0:
+            return "No PA analysis yet."
+        analysis_path = Path(self.experiment_run_dir) / "analysis" / f"analysis_iter_{current_iteration - 1}.md"
+        if analysis_path.exists():
+            try:
+                return analysis_path.read_text(encoding="utf-8")
+            except Exception:
+                return "PA analysis could not be read."
+        return "PA analysis not found for previous iteration."
+
     def generate_initial_hypotheses(self, competition_info: CompetitionInfo, num_hypotheses: int) -> List[ExperimentHypothesis]:
         """Generate initial experiment hypotheses."""
         method_name = "generate_initial_hypotheses"
@@ -269,7 +303,7 @@ class KnowledgeStrategyEngine(BaseComponent):
         if self.use_codex_for_generation:
             # Use Codex with external prompts for hypothesis generation
             hypotheses = self._generate_hypotheses_with_codex(
-                competition_info, num_hypotheses, iteration=0, is_initial=True
+                competition_info, num_hypotheses, iteration=0, is_initial=True, official_scores=None
             )
         else:
             # Fallback to original programmatic generation
@@ -304,7 +338,8 @@ class KnowledgeStrategyEngine(BaseComponent):
                                        iteration: int,
                                        is_initial: bool = True,
                                        analysis_result: Optional[AnalysisResult] = None,
-                                       previous_results: Optional[List[ExperimentResult]] = None) -> List[ExperimentHypothesis]:
+                                       previous_results: Optional[List[ExperimentResult]] = None,
+                                       official_scores: Optional[Dict[str, float]] = None) -> List[ExperimentHypothesis]:
         """Generate hypotheses using Codex with the new A/B template pipeline."""
         self.logger.info(f"Generating hypotheses using Codex for iteration {iteration}")
 
@@ -320,7 +355,8 @@ class KnowledgeStrategyEngine(BaseComponent):
             iteration=iteration,
             template_info=template_info,
             analysis_result=analysis_result,
-            previous_results=previous_results
+            previous_results=previous_results,
+            official_scores=official_scores
         )
 
         # Save filled prompt for debugging
@@ -329,18 +365,23 @@ class KnowledgeStrategyEngine(BaseComponent):
         self.logger.info(f"Saved filled prompt to {prompt_path}")
 
         # Execute Codex to fill templates
-        codex_responses_dir = os.path.join(self.experiment_run_dir, "codex-responses")
-        try:
-            codex_result = execute_codex(
-                mode=CodexMode.KSE,
-                prompt_content=filled_prompt,
-                output_dir=str(iteration_dir),
-                iteration=iteration,
-                codex_responses_dir=codex_responses_dir,
-                timeout=self.codex_timeout,
-                logger=self.logger
-            )
-        except Exception as e:
+            codex_responses_dir = os.path.join(self.experiment_run_dir, "codex-responses")
+            try:
+                use_resume = iteration > 0
+                run_label = "initial" if iteration == 0 else "resume"
+                resume_prompt = filled_prompt if use_resume else None
+                codex_result = execute_codex(
+                    mode=CodexMode.KSE,
+                    prompt_content=filled_prompt,
+                    output_dir=str(iteration_dir),
+                    iteration=iteration,
+                    codex_responses_dir=codex_responses_dir,
+                    timeout=self.codex_timeout,
+                    logger=self.logger,
+                    resume_prompt=resume_prompt,
+                    run_label=run_label
+                )
+            except Exception as e:
             self.logger.error(f"Error calling Codex for KSE: {e}")
             codex_result = CodexResult(
                 success=False,
@@ -391,18 +432,29 @@ class KnowledgeStrategyEngine(BaseComponent):
                           iteration: int,
                           template_info: Dict[str, Any],
                           analysis_result: Optional[AnalysisResult],
-                          previous_results: Optional[List[ExperimentResult]]) -> str:
-        """Build the Codex instruction prompt for KSE based on the instruction file."""
-        instruction_path: Path = template_info["instruction_path"]
+                          previous_results: Optional[List[ExperimentResult]],
+                          official_scores: Optional[Dict[str, float]] = None) -> str:
+        """Build the Codex instruction prompt for KSE based on the iteration-specific template."""
+        # Choose prompt template: first run vs resume
+        prompts_dir = Path(self.prompts_dir) if self.prompts_dir else Path("prompts")
+        if iteration == 0:
+            instruction_path = prompts_dir / "KSE" / "kse_prompt_first_run.md"
+        else:
+            instruction_path = prompts_dir / "KSE" / "kse_prompt_resume.md"
+
+        if not instruction_path.exists():
+            # Fallback to legacy prompt if new templates are missing
+            instruction_path = template_info["instruction_path"]
+
         prompt_template = instruction_path.read_text(encoding="utf-8")
 
         data_paths = self._get_data_paths_relative(template_info["iteration_dir"])
         common_rel = os.path.relpath(template_info["common_path"], template_info["iteration_dir"])
-        experiment_rel_lines = "\n  ".join(
-            f"- {os.path.relpath(path, template_info['iteration_dir'])}"
+        experiment_rel_lines = "\n- " + "\n- ".join(
+            f"{os.path.relpath(path, template_info['iteration_dir'])}"
             for path in template_info["experiment_paths"]
         )
-        experiment_paths_block = f"\n  {experiment_rel_lines}" if experiment_rel_lines else ""
+        experiment_paths_block = experiment_rel_lines if experiment_rel_lines.strip() else ""
 
         kaggle_path_label = (
             f"{data_paths['kaggle']} (Kaggle API data)" if data_paths["kaggle"] != "not available" else "not available"
@@ -411,14 +463,23 @@ class KnowledgeStrategyEngine(BaseComponent):
             f"{data_paths['crawler']} (crawler outputs)" if data_paths["crawler"] != "not available" else "not available"
         )
 
+        context_block = "\n".join([
+            f"- Competition name: {competition_info.name or 'Unknown competition'}",
+            f"- Iteration: {iteration}",
+            f"- Number of experiments: {num_hypotheses}",
+            f"- Data sources: {kaggle_path_label}",
+            f"- Crawler sources: {crawler_path_label}",
+            f"- Common template: {common_rel}",
+            f"- Experiment templates:\n{experiment_paths_block}"
+        ])
+
+        waa_results_block = self._format_waa_results(previous_results, official_scores, iteration)
+        pa_analysis_block = self._load_pa_analysis_markdown(iteration)
+
         replacements = {
-            "<<COMPETITION_NAME>>": competition_info.name or "Unknown competition",
-            "<<ITERATION_NUMBER>>": str(iteration),
-            "<<NUM_EXPERIMENTS>>": str(num_hypotheses),
-            "<<DATA_SOURCES>>": kaggle_path_label,
-            "<<CRAWLER_SOURCES>>": crawler_path_label,
-            "<<COMMON_TEMPLATE_PATH>>": common_rel,
-            "<<EXPERIMENT_TEMPLATE_PATHS>>": experiment_paths_block
+            "<<CONTEXT_BLOCK>>": context_block,
+            "<<WAA_RESULTS>>": waa_results_block,
+            "<<PA_ANALYSIS>>": pa_analysis_block
         }
 
         prompt = prompt_template
@@ -670,7 +731,8 @@ class KnowledgeStrategyEngine(BaseComponent):
                                  current_iteration: int,
                                  num_hypotheses: int,
                                  analysis_result: Optional[AnalysisResult],
-                                 previous_results: List[ExperimentResult]) -> List[ExperimentHypothesis]:
+                                 previous_results: List[ExperimentResult],
+                                 official_scores: Optional[Dict[str, float]] = None) -> List[ExperimentHypothesis]:
         """Generate the next set of hypotheses based on analysis and past results."""
         method_name = "generate_next_hypotheses"
         self._log_start(method_name, iteration=current_iteration, num_hypotheses=num_hypotheses)
@@ -679,7 +741,8 @@ class KnowledgeStrategyEngine(BaseComponent):
             # Use Codex with external prompts for hypothesis generation
             hypotheses = self._generate_hypotheses_with_codex(
                 competition_info, num_hypotheses, iteration=current_iteration,
-                is_initial=False, analysis_result=analysis_result, previous_results=previous_results
+                is_initial=False, analysis_result=analysis_result, previous_results=previous_results,
+                official_scores=official_scores
             )
         else:
             # Fallback to original programmatic generation
