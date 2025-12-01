@@ -167,9 +167,26 @@ statuses:
 
 {task_content}
 
-## Outputs & Files (MANDATORY)
+# Experiment Task: {exp_id}
 
-- `result_{exp_id}.json` with a top-level `score` field (float) representing the primary CV metric, plus any detailed metrics.
-- `submission_{exp_id}.csv` (exact name) with predictions in competition format.
-- Log key steps to root-level `waa_{exp_id}.log` (copy here if generated elsewhere).
-- Update `experiment-status.yaml` with RUNNING/COMPLETE entries (real ISO timestamps) and then create `DONE_{exp_id}` once all outputs are ready.
+## High-Level Objective
+- **Maximize official/public score** for this hypothesis. You may widen hyperparameter ranges, add seeds, light feature tweaks, and simple ensembles within the hypothesis spirit.
+- Always use robust CV (stratified/group as appropriate); treat CV as gatekeeper and official score as ultimate truth.
+- Avoid leakage; respect resource/status rules.
+
+## Aggressive Execution Rules
+- Hyperparameter search: use Optuna (or similar) with pruning; run enough trials to saturate allocated GPU/CPU; widen ranges if early plateau.
+- Parallelism: run trials asynchronously; saturate GPUs/CPUs within allocation.
+- Validation: stratified K-fold; log mean/std; monitor train/val gaps for over/underfitting.
+- Ensembling: if suggested, build blends/stackers; else consider simple averaging of top CV models where safe.
+- Logging: record params, seeds, CV scores, trial summaries, inference steps in `waa_{exp_id}.log`.
+
+## Safeguards
+- Never rely on a single split; always CV.
+- Guard against leakage (target encoding, shared groups); keep folds clean.
+- If time-constrained, run quick shallow scans (higher lr, lower depth) before long runs.
+
+## Deliverables
+- `result_{exp_id}.json` (CV metrics + key params), `submission_{exp_id}.csv`, `DONE_{exp_id}`.
+- Update `experiment-status.yaml` per RUNNING/COMPLETE rules.
+- Keep outputs reproducible (seeds, versions).

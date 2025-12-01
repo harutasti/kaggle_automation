@@ -1,13 +1,17 @@
 # Performance Analyzer (Resume)
 
-You are resuming a Codex session (`resume --last`). Update the analysis using the newly completed experiments and their **official scores**.
+You are resuming a Codex session (`resume --last`). **Update and deepen** the analysis using the latest experiments and **official scores**.
 
-## Required Inputs (read carefully)
-- The latest WAA experiment outcomes with official scores are embedded in `WAA Results`.
-- Prior analysis context is available from the existing session; refine and expand with the new data.
+## Inputs (read fully)
+- Latest WAA outcomes with official scores: `WAA Results`.
+- Prior context from the existing session persists; refine with new evidence.
 
-## Output
-Produce an updated markdown report with all required sections (success/failure patterns, feature importance, hyperparameter insights, overfitting, efficiency, recommendations, unresolved questions, convergence, key insights, iteration summary). Highlight what changed based on the new results and official scores.
+## Output (one markdown)
+Same required sections as first run. Explicitly call out **deltas vs prior iteration**: what improved/regressed/plateaued, and why. Keep recommendations prescriptive and tied to exp IDs and official scores.
+
+## Emphasis
+- Official scores are primary; CV is secondary.
+- Deliver clear exploit/explore/avoid lists with concrete parameter/feature/validation guidance.
 
 ## WAA Results (official scores)
 <<WAA_RESULTS>>

@@ -1,16 +1,17 @@
 # KSE Prompt (Resume Iteration)
 
-You are continuing an active Codex session (`resume --last`). Update the experiment plans based on new evidence from completed WAAs and the latest PA analysis. Keep prior good content, but improve it using the new information below.
+You are resuming an active Codex session (`resume --last`). **Update and improve** the existing plans using fresh evidence. Keep strong prior content, but revise to exploit what worked and drop what failed.
 
-## Required Inputs (read carefully)
-- Competition context, rules, metric, data sources, and template paths are provided below.
-- Newly completed WAA experiments with **official scores** are embedded in `WAA Results`; incorporate their learnings.
-- The most recent PA analysis markdown is embedded in `PA Analysis`; honor its insights and recommendations.
+## Inputs (read fully)
+- Competition context and template paths: `Context Block`.
+- Newly completed WAA results with **official scores**: `WAA Results`.
+- Latest PA analysis markdown: `PA Analysis`.
 
-## Actions
-1) Refine the common template and all experiment templates; remove every `{{...}}` placeholder.
-2) Adjust strategies to exploit high-scoring patterns and drop failing ones (per WAA Results + PA Analysis).
-3) Keep Markdown well structured; do not create extra files.
+## Required Actions
+1) Refine common + experiment templates; remove all `{{...}}`.
+2) Exploit high-scoring patterns; deprecate low-value lines. Be explicit about changes.
+3) Maintain diversity: include GBDT, linear/shallow, deep/tabular DL, stacking/blends, feature-heavy variants.
+4) Provide concrete specs (features, validation, ranges/seeds, ensembles, fallbacks).
 
 ## Context Block
 <<CONTEXT_BLOCK>>
@@ -22,6 +23,5 @@ You are continuing an active Codex session (`resume --last`). Update the experim
 <<PA_ANALYSIS>>
 
 ## Quality Rules
-- Do not overwrite validated good content without reason; only improve where evidence suggests.
-- Maintain diversity across experiments (model families, feature ideas, validation choices).
-- Explicitly incorporate findings from WAA Results and PA Analysis.
+- Do not undo good content without evidence.
+- Each experiment remains distinct and justified by WAA/PA evidence.
