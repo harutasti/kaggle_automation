@@ -683,11 +683,14 @@ Please execute the experiment exactly as described above. Ensure you:
         method_name = "cleanup_worktree"
         self._log_start(method_name, exp_id=exp_id, path=worktree_path)
         try:
-            # Prune Git worktree metadata first
+            # Remove worktree via git to avoid "branch is checked out" warnings
+            try:
+                self.repo.git.worktree('remove', '-f', worktree_path)
+            except git.GitCommandError as wt_err:
+                self.logger.warning(f"git worktree remove failed for {worktree_path}: {wt_err.stderr}")
+
+            # Prune metadata and delete branch
             self.repo.git.worktree('prune')
-            # Remove the physical directory
-            remove_dir(worktree_path)
-            # Optionally delete the corresponding branch
             try:
                 branch_name = f"exp/{exp_id}"
                 self.repo.git.branch('-D', branch_name)
@@ -695,6 +698,9 @@ Please execute the experiment exactly as described above. Ensure you:
             except git.GitCommandError as branch_error:
                  # Branch may already be gone; safe to ignore
                  self.logger.warning(f"Could not delete branch exp/{exp_id}: {branch_error.stderr}. It might have been deleted already.")
+
+            # Remove the physical directory if it still exists
+            remove_dir(worktree_path)
 
             self._log_end(method_name)
         except git.GitCommandError as e:
