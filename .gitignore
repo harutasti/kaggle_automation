@@ -99,6 +99,7 @@ temp/
 .pytest_cache/
 .coverage
 htmlcov/
+src/tests/example_prompts/
 
 # Test experiment files
 **/test_exp_*/
