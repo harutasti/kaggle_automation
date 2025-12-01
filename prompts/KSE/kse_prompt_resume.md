@@ -1,27 +1,205 @@
 # KSE Prompt (Resume Iteration)
 
-You are resuming an active Codex session (`resume --last`). **Update and improve** the existing plans using fresh evidence. Keep strong prior content, but revise to exploit what worked and drop what failed.
+You are resuming the Knowledge Strategy Engine with new evidence from completed experiments. Your task is to **evolve the strategy** based on what worked and what failed, while maintaining hypothesis diversity.
 
-## Inputs (read fully)
-- Competition context and template paths: `Context Block`.
-- Newly completed WAA results with **official scores**: `WAA Results`.
-- Latest PA analysis markdown: `PA Analysis`.
+---
 
-## Required Actions
-1) Refine common + experiment templates; remove all `{{...}}`.
-2) Exploit high-scoring patterns; deprecate low-value lines. Be explicit about changes.
-3) Maintain diversity: include GBDT, linear/shallow, deep/tabular DL, stacking/blends, feature-heavy variants.
-4) Provide concrete specs (features, validation, ranges/seeds, ensembles, fallbacks).
+## YOUR MISSION: Strategic Evolution
 
-## Context Block
+### Analyze Before Acting
+Before generating new hypotheses:
+1. **Rank all experiments by official score** (not CV score)
+2. **Identify the top 2-3 performing strategies** and extract their key elements
+3. **Identify complete failures** and understand root causes
+4. **Calculate improvement rate**: Are scores improving, plateauing, or declining?
+5. **Check diversity**: Were previous hypotheses truly different?
+
+### Evolution, Not Revolution
+- Keep what works—don't abandon successful patterns without evidence
+- Fix what failed—understand root causes before retrying similar approaches
+- Fill gaps—what hasn't been tried that should be?
+
+---
+
+## PHASE 1: Previous Results Analysis
+
+### Deep Dive on Results
+For each completed experiment:
+- What was the official score? (primary metric)
+- What was the CV score? (stability indicator)
+- What was the train-val gap? (overfitting indicator)
+- What unique elements did it use?
+- Why did it succeed or fail?
+
+### PA Recommendations Review
+Extract from PA analysis:
+- **MUST DO**: Actions PA marked as non-negotiable
+- **MUST NOT DO**: Approaches PA marked as failures to avoid
+- **QUESTIONS TO ANSWER**: Hypotheses PA wants tested
+
+### Trajectory Assessment
+Calculate:
+- **Score improvement**: Best score this iteration vs. previous best
+- **Improvement rate**: Trend over iterations
+- **Gap to ceiling**: Distance from known benchmarks/winning scores
+
+---
+
+## PHASE 2: Strategy Evolution Rules
+
+### Adapt Resource Allocation Based on Trajectory
+
+**If IMPROVING (>1% gain per iteration):**
+- **60% Exploitation**: Refine winning approaches with targeted improvements
+- **30% Exploration**: Try promising untested approaches
+- **10% Moonshot**: One high-risk/high-reward experiment
+
+**If PLATEAUING (<1% gain for 2+ iterations):**
+- **30% Exploitation**: Only the very best performers
+- **50% Exploration**: Significantly different approaches
+- **20% Moonshot**: Novel techniques from recent research
+
+**If DECLINING (scores getting worse):**
+- **20% Exploitation**: Stabilize best known approach
+- **40% Diagnostic**: Experiments to understand what broke
+- **40% Reset**: Return to simpler baselines and rebuild
+
+### Kill and Replace Protocol
+
+**Remove approaches that:**
+- Failed twice without improvement
+- Have fundamental flaws identified by PA
+- Are too similar to better-performing alternatives
+
+**Replace with:**
+- Genuinely new approaches from research findings
+- Combinations of successful elements from top experiments
+- PA high-priority recommendations
+
+**Document:**
+- What was killed and why
+- What replaced it and why it's expected to perform better
+
+---
+
+## PHASE 3: Research Update (MANDATORY)
+
+### Web Search for Fresh Ideas
+Use web search to find:
+- New techniques that might address observed weaknesses
+- Community solutions to problems similar to your failures
+- Updated benchmarks or methods published recently
+- Winning approaches from similar competitions
+
+### Apply Research to Strategy
+- Which research findings apply to high-priority PA recommendations?
+- What new techniques could break the plateau (if plateauing)?
+- What fundamentally different approaches haven't been tried?
+
+---
+
+## PHASE 4: Hypothesis Generation with Evidence
+
+### For Each Hypothesis, Document:
+
+**Builds on:**
+- Which previous experiment(s) this extends (cite exp_ids)
+- What specific elements are being kept and why
+
+**Addresses:**
+- Which PA insight or recommendation this targets
+- What unresolved question this helps answer
+
+**Differentiates by:**
+- How this is fundamentally different from other hypotheses this round
+- What unique approach or combination it uses
+
+**Research source:**
+- What web search finding or discussion insight supports this
+- Why this approach is expected to work
+
+---
+
+## Inputs (Read Fully)
+
+### Context Block
+Contains: Competition context, data paths, templates
 <<CONTEXT_BLOCK>>
 
-## WAA Results (official scores)
+### WAA Results (Official Scores)
+Contains: Completed experiment results with official/public leaderboard scores
 <<WAA_RESULTS>>
 
-## PA Analysis (previous iteration)
+### PA Analysis (Previous Iteration)
+Contains: Performance analysis with success/failure patterns and recommendations
 <<PA_ANALYSIS>>
 
+---
+
+## Required Diversity (Maintain Across Iterations)
+
+Even in later iterations, maintain coverage:
+1. **GBDT Line**: At least one LightGBM/XGBoost/CatBoost approach
+2. **Linear/Shallow**: At least one interpretable baseline
+3. **Deep/Tabular DL**: At least one neural approach
+4. **Ensemble/Stack**: At least one combination approach
+5. **Feature-Heavy**: At least one feature engineering focus
+
+**Note**: You may retire approaches in categories that consistently fail, but document the decision and have coverage in other categories.
+
+---
+
+## Deliverables
+
+### 1. Evolution Summary (NEW)
+Document at the start of common template:
+- What changed from previous iteration and why
+- Which approaches were killed and why
+- Which new approaches were added and why
+- Current trajectory assessment (improving/plateauing/declining)
+
+### 2. Updated Common Template
+- Refine based on learnings
+- Update research findings section with new discoveries
+- Adjust validation strategy if evidence supports changes
+
+### 3. Updated Experiment Templates
+For each hypothesis:
+- Clear evidence-based justification
+- Explicit link to PA recommendations
+- Differentiation statement
+- Expected improvement with rationale
+
+### 4. Updated Diversity Matrix
+Show how diversity is maintained despite strategic evolution.
+
+---
+
 ## Quality Rules
-- Do not undo good content without evidence.
-- Each experiment remains distinct and justified by WAA/PA evidence.
+
+### Evidence-Based Changes
+- **DO NOT** undo good content without evidence
+- **DO NOT** abandon successful patterns arbitrarily
+- **DO** cite specific experiment results for every major decision
+- **DO** reference PA analysis for recommendations
+
+### Hypothesis Quality
+- Each experiment remains distinct (verified via diversity matrix)
+- Each experiment is justified by WAA/PA evidence
+- No near-duplicates of previous iterations
+- No placeholders (`{{...}}`) remain
+
+### Strategic Coherence
+- Evolution should be logical progression from previous iteration
+- Changes should address identified weaknesses
+- New approaches should fill gaps, not repeat mistakes
+
+---
+
+## Anti-Patterns to Avoid
+
+- **Overreaction**: Abandoning an entire approach category due to one failure
+- **Underreaction**: Repeating failed approaches without meaningful changes
+- **Tunnel vision**: Over-focusing on one approach at expense of diversity
+- **Churn**: Changing everything each iteration without learning
+- **Ignoring PA**: Not incorporating PA's prioritized recommendations

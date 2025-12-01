@@ -9,16 +9,57 @@
 - data_scope: {{DATA_SCOPE}}
 - expected_outcome: {{EXPECTED_OUTCOME}}
 - risk_level: {{RISK_LEVEL}}
+- complexity_level: {{COMPLEXITY_LEVEL}}
+- model_family: {{MODEL_FAMILY_CATEGORY}}
+- feature_philosophy: {{FEATURE_PHILOSOPHY}}
 
 ### Parameters (JSON)
 ```json
 {{PARAMETERS_JSON}}
 ```
 
+---
+
+## Differentiation Statement (REQUIRED)
+
+### How This Experiment is Unique
+{{DIFFERENTIATION_STATEMENT}}
+
+### Model Family Positioning
+- This experiment uses: {{MODEL_FAMILY_CATEGORY}}
+- Other experiments this round use: {{OTHER_MODEL_FAMILIES}}
+- Why this family for this hypothesis: {{MODEL_FAMILY_RATIONALE}}
+
+### Feature Strategy Positioning
+- This experiment uses: {{FEATURE_PHILOSOPHY}}
+- Other experiments this round use: {{OTHER_FEATURE_STRATEGIES}}
+- Why this strategy: {{FEATURE_STRATEGY_RATIONALE}}
+
+### Complexity Positioning
+- This is a {{COMPLEXITY_LEVEL}} complexity approach
+- It complements {{COMPLEMENTARY_EXPERIMENTS}} which are {{COMPLEMENTARY_COMPLEXITY}} approaches
+- Why this complexity level: {{COMPLEXITY_RATIONALE}}
+
+### Unique Element
+What makes this experiment irreplaceable in the portfolio:
+{{UNIQUE_ELEMENT}}
+
+---
+
 ## Hypothesis and Rationale
-- Core idea and why it should work for this competition: {{HYPOTHESIS_AND_RATIONALE}}
-- Evidence from data/discussions/benchmarks supporting this plan: {{EVIDENCE}}
-- Differentiation from other experiments this round: {{DIFFERENTIATION}}
+
+### Core Hypothesis
+{{HYPOTHESIS_AND_RATIONALE}}
+
+### Evidence Supporting This Approach
+{{EVIDENCE}}
+
+### Research Backing (if applicable)
+- Web search finding: {{WEB_SEARCH_SUPPORT}}
+- Discussion/notebook insight: {{DISCUSSION_SUPPORT}}
+- Why this is expected to work for this competition: {{COMPETITION_FIT}}
+
+---
 
 ## Data Prep & Validation
 - Data loading, cleaning, and leakage controls: {{DATA_PREP}}
@@ -30,12 +71,34 @@
 - Model family and variants to try: {{MODEL_FAMILY}}
 - Loss/metric alignment and regularization: {{LOSS_AND_REGULARIZATION}}
 - Training recipe (schedules, early stopping, batch sizes, epochs/trees): {{TRAINING_RECIPE}}
-- Ensembling/blending/staking rules if applicable: {{ENSEMBLING_PLAN}}
+- Ensembling/blending/stacking rules if applicable: {{ENSEMBLING_PLAN}}
 
 ## Feature Engineering / Augmentation (if relevant)
 - Top feature ideas and transformations: {{FEATURE_ENG_IDEAS}}
 - Augmentation strategy for data types that benefit from it: {{AUGMENTATION}}
 - Expected gains and risks to monitor: {{FEATURE_RISKS}}
+
+---
+
+## WAA Guidance: Aggressive Execution
+
+### Hyperparameter Exploration Space
+WAA should explore these ranges (but may go wider if promising):
+{{HYPERPARAMETER_RANGES}}
+
+### Minimum Experimentation Requirements
+- Minimum Optuna trials: {{MIN_OPTUNA_TRIALS}}
+- Must-try variations: {{MUST_TRY_VARIATIONS}}
+- Quick wins to test first: {{QUICK_WINS}}
+
+### Freedom to Deviate
+WAA is authorized to:
+- Widen hyperparameter ranges if early results suggest benefit
+- Try feature variations within the philosophy of this experiment
+- Build simple ensembles of best configurations
+- Document all deviations for PA analysis
+
+---
 
 ## Evaluation & Reporting
 - What to log to `waa_{{EXPERIMENT_ID}}.log`: {{LOGGING_PLAN}}

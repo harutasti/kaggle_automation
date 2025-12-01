@@ -130,3 +130,54 @@ statuses:
 ```
 
 **REMEMBER**: Setting RUNNING or COMPLETE means you MUST exit the session immediately!
+
+---
+
+## Maximizing Your Session Time (AGGRESSIVE UTILIZATION)
+
+Your goal is not just to run the experiment, but to **exhaust all valuable experiments** before setting COMPLETE.
+
+### Before Setting RUNNING
+
+**Queue all experiments you want to run:**
+- Set up Optuna study with sufficient trials (50-100+)
+- Configure automatic hyperparameter search
+- Prepare ensemble/blending scripts to run after individual models
+- Set up early stopping to avoid wasted compute
+
+**Optimize for maximum learning:**
+- Configure proper logging so you can analyze results later
+- Save intermediate checkpoints
+- Record all trial results, not just the best
+
+### While RUNNING (Background Process)
+
+Your training script should:
+- Run extensive hyperparameter search (Optuna with many trials)
+- Log intermediate results to files
+- Save checkpoints periodically
+- Run CV folds in sequence or parallel
+- Automatically try multiple configurations
+
+### Upon Resume
+
+When the system resumes your session:
+1. **Immediately check results**: Review training logs
+2. **Analyze what worked**: Identify best configurations
+3. **If time remains**, run additional experiments:
+   - Ensemble top models
+   - Fine-tune best configuration
+   - Try quick ablations
+4. **Only set COMPLETE** when you've exhausted valuable experiments
+
+### Session Maximization Checklist
+
+Before setting COMPLETE, verify:
+- [ ] Ran sufficient Optuna trials (50+ minimum)
+- [ ] Explored hyperparameter space adequately
+- [ ] Tried ensembling best models (if multiple strong models exist)
+- [ ] Logged all results thoroughly for PA analysis
+- [ ] Produced valid submission file
+- [ ] No obvious improvements left untried
+
+**Goal**: When you set COMPLETE, you should have exhausted all reasonable experiments—not just run the minimum.

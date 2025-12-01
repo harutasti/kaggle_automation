@@ -130,4 +130,50 @@ lgb.train(params={{'num_threads': -1}}, ...)
 
 ---
 
+## Aggressive GPU Utilization (MAXIMIZE YOUR RESOURCES)
+
+Your goal is to keep GPU utilization **above 80%** during training. Don't let allocated resources sit idle!
+
+### Utilization Targets
+
+**GPU-Bound Operations:**
+- Training: Maintain >80% GPU utilization
+- Batch size: Use the LARGEST that fits in memory
+- Mixed precision: Enable fp16 for faster throughput
+
+**CPU-Bound Operations:**
+- GBDT models: Set n_jobs=-1 (use all cores)
+- Data preprocessing: Parallelize with multiple workers
+- CV folds: Run in parallel when possible
+
+### Maximizing Throughput
+
+**1. Find Optimal Batch Size**
+Start large and reduce only if OOM occurs. Larger batches = better GPU utilization.
+
+**2. Enable Mixed Precision**
+Use automatic mixed precision (AMP) for neural networks—typically 1.5-2x speedup.
+
+**3. Optimize Data Loading**
+- Use multiple data loading workers
+- Enable pin_memory for faster GPU transfer
+- Prefetch batches to avoid idle GPU time
+
+**4. Monitor and Adjust**
+Check GPU utilization periodically. If below 80%, increase batch size or data loading workers.
+
+### When to Use CPU vs GPU
+
+**Use GPU for:**
+- Neural network training/inference
+- Large matrix operations
+- Deep tabular models (TabNet, etc.)
+
+**Use CPU for:**
+- GBDT models (LightGBM, XGBoost, CatBoost)—they're CPU-optimized
+- Data preprocessing and feature engineering
+- Small models where GPU overhead exceeds benefit
+
+---
+
 **WARNING**: Exceeding your memory allocation will cause CUDA Out-of-Memory errors and may affect other parallel experiments running on the same GPU!

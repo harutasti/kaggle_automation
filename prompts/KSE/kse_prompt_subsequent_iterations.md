@@ -2,10 +2,33 @@
 
 CONTRACT (read first):
 - Goal: Generate {num_hypotheses} diverse experiment hypotheses that improve upon iteration {prev_iter} results without using test data for decisions.
+- **Score Priority**: Official Kaggle score is the PRIMARY truth. CV scores are SECONDARY and used only for development guidance.
 - Data Ethics: No external lookups keyed on test samples; no test-driven feature design or imputation.
 - Output Format: Use Markdown sections exactly as specified. Do NOT create any other files except the required markdown hypothesis files.
 - Determinism: Reuse same CV folds as iteration {prev_iter} for comparability. Keep random_state=42.
 - Improvement Target: Beat current best {best_score} by ≥{improvement_threshold}% or explore orthogonal approaches.
+- **Evolution Required**: Each iteration must EVOLVE strategy based on trajectory (improving/plateauing/declining).
+
+---
+
+## PHASE 0: Targeted Research (Subsequent Iteration)
+
+Even in subsequent iterations, conduct focused research:
+
+### What to Search For
+- **Specific technique refinements:** If LightGBM worked, search for "LightGBM tuning tricks {competition_type}"
+- **Failure diagnosis:** If neural nets failed, search for "tabular neural network pitfalls"
+- **Breakthrough techniques:** Check if any new methods emerged since last iteration
+
+### PA-Directed Research
+Based on PA's analysis, investigate:
+- {pa_recommended_technique_1}: Search for implementation details and pitfalls
+- {pa_recommended_technique_2}: Find examples of successful application
+- Unresolved question: Search for similar competition solutions that addressed {pa_question}
+
+**Document new findings in the Research Updates section below.**
+
+---
 
 ## Competition Context
 
@@ -19,6 +42,101 @@ CONTRACT (read first):
 - Test: {test_size} rows
 - Target: {target_variable}
 - CV Scheme Used: {cv_scheme_from_iter1} (MUST reuse for comparability)
+
+---
+
+## Score Tracking (Official vs CV)
+
+### Official Kaggle Scores (PRIMARY)
+| Iteration | Experiment | Official Score | Rank/Position | Delta from Previous Best |
+|-----------|------------|----------------|---------------|--------------------------|
+| {iter_1} | {exp_id_1} | {official_1} | {rank_1} | - |
+| {iter_2} | {exp_id_2} | {official_2} | {rank_2} | {delta_2} |
+| ... | ... | ... | ... | ... |
+
+### CV vs Official Score Correlation
+| Experiment | CV Score | Official Score | Gap | Reliable? |
+|------------|----------|----------------|-----|-----------|
+| {exp_1} | {cv_1} | {official_1} | {gap_1} | {yes/no} |
+| {exp_2} | {cv_2} | {official_2} | {gap_2} | {yes/no} |
+
+**CV Reliability Assessment:** {assessment of whether CV tracks official well}
+- If CV consistently overestimates: Consider more conservative thresholds
+- If CV consistently underestimates: Current CV may be too pessimistic
+- If gap varies wildly: CV scheme may not match test distribution
+
+---
+
+## Trajectory Analysis (CRITICAL FOR STRATEGY)
+
+### Current Trajectory Classification
+
+Based on last 2-3 iterations, classify the trajectory:
+
+| Trajectory | Criteria | Strategy Implication |
+|------------|----------|---------------------|
+| **IMPROVING** | Each iteration beats previous by >1% | Continue current direction, exploit what works |
+| **PLATEAUING** | Improvements <0.5% for 2+ iterations | Time to explore orthogonal approaches |
+| **DECLINING** | Latest iteration worse than previous | Diagnose failure, potentially reset |
+
+**Current Trajectory:** {IMPROVING / PLATEAUING / DECLINING}
+
+### Strategy Evolution Rules
+
+**If IMPROVING:**
+- Allocation: 60% exploit current winners, 30% incremental innovation, 10% moonshot
+- Focus: Refine hyperparameters of winning models, add features to working pipelines
+- Risk tolerance: Lower (don't break what's working)
+
+**If PLATEAUING:**
+- Allocation: 30% exploit, 50% explore new directions, 20% moonshot
+- Focus: Try fundamentally different model families, new feature philosophies
+- Risk tolerance: Higher (need to break out of local optimum)
+
+**If DECLINING:**
+- Allocation: 20% diagnose failures, 40% return to previous winners, 40% reset with new approach
+- Focus: Understand what broke, don't repeat mistakes
+- Risk tolerance: Medium (controlled experiments to identify issue)
+
+---
+
+## Kill/Replace Protocol
+
+### Approaches to KILL (Do Not Repeat)
+Based on PA analysis, these approaches have proven ineffective:
+
+| Killed Approach | Why Killed | Iterations Tried | Evidence |
+|-----------------|------------|------------------|----------|
+| {killed_1} | {reason_1} | {iterations_1} | {evidence_1} |
+| {killed_2} | {reason_2} | {iterations_2} | {evidence_2} |
+
+**Rule:** Do NOT generate hypotheses similar to killed approaches unless you have specific evidence they might work now.
+
+### Approaches to EVOLVE (Modify and Improve)
+These showed promise but need refinement:
+
+| Evolve Approach | Current Score | Identified Weakness | Proposed Fix |
+|-----------------|---------------|---------------------|--------------|
+| {evolve_1} | {score_1} | {weakness_1} | {fix_1} |
+| {evolve_2} | {score_2} | {weakness_2} | {fix_2} |
+
+### New Approaches to INTRODUCE
+Based on trajectory and research, introduce:
+- {new_approach_1}: Rationale: {why_now}
+- {new_approach_2}: Rationale: {why_now}
+
+---
+
+## Research Updates (Subsequent Iteration Findings)
+
+### New Discoveries Since Last Iteration
+- {new_finding_1}
+- {new_finding_2}
+
+### Techniques to Incorporate This Iteration
+Based on trajectory + new research:
+1. {technique_1}: Apply to {which_hypothesis}
+2. {technique_2}: Apply to {which_hypothesis}
 
 ---
 
@@ -63,22 +181,47 @@ Top stable features across successful models:
 
 ## Hypothesis Generation Strategy for Iteration {iteration_number}
 
-### Mandatory Distribution
-Your {num_hypotheses} hypotheses MUST follow this allocation:
+### Allocation Based on Trajectory (ADAPT TO CURRENT STATE)
 
-**Exploitation (40-50%):** {2-3 hypotheses}
+**If trajectory is IMPROVING:**
+| Category | Allocation | Focus |
+|----------|------------|-------|
+| Exploit | 60% ({N} hypotheses) | Refine winners, targeted improvements |
+| Innovate | 30% ({N} hypotheses) | Combine successful elements, PA recommendations |
+| Moonshot | 10% ({N} hypotheses) | One high-risk experiment |
+
+**If trajectory is PLATEAUING:**
+| Category | Allocation | Focus |
+|----------|------------|-------|
+| Exploit | 30% ({N} hypotheses) | Only keep absolute best |
+| Explore | 50% ({N} hypotheses) | New model families, new feature philosophies |
+| Moonshot | 20% ({N} hypotheses) | Aggressive new approaches |
+
+**If trajectory is DECLINING:**
+| Category | Allocation | Focus |
+|----------|------------|-------|
+| Diagnose | 20% ({N} hypotheses) | Ablations to find what broke |
+| Return | 40% ({N} hypotheses) | Return to previous winning approaches |
+| Reset | 40% ({N} hypotheses) | Fresh start with different paradigm |
+
+### Current Allocation (Based on {current_trajectory} Trajectory)
+Your {num_hypotheses} hypotheses MUST follow:
+
+**Exploitation ({exploit_percent}%):** {exploit_count} hypotheses
 - Refine {best_experiment_id} with better hyperparameters
 - Add targeted features to successful approach
 - Fix specific weaknesses identified
 
-**Incremental Innovation (30-40%):** {1-2 hypotheses}
+**Exploration/Innovation ({explore_percent}%):** {explore_count} hypotheses
 - Combine elements from {exp_1} and {exp_2}
 - Test PA high-priority recommendation: {recommendation}
 - Address unresolved question Q1
+- Try fundamentally different approach if plateauing
 
-**Exploration (10-20%):** {1 hypothesis}
+**Moonshot/Reset ({moonshot_percent}%):** {moonshot_count} hypotheses
 - Orthogonal approach not tried yet
 - High-risk/high-reward based on community insights
+- Or diagnostic ablation if declining
 
 ### Score Targets
 
@@ -87,6 +230,13 @@ Based on iteration trajectory:
 - Target: {best_score} + {target_improvement}
 - Stretch: {best_score} + {stretch_improvement}
 - Theoretical ceiling (from discussions): {ceiling_score}
+
+### Diversity Maintenance (Even in Later Iterations)
+
+Even while exploiting winners, maintain diversity:
+- Do NOT generate 3+ variations of the same winning model
+- Each "exploit" hypothesis must have a DISTINCT improvement direction
+- At least 1 hypothesis should use a model family NOT in current winners
 
 ---
 
@@ -255,13 +405,39 @@ If score < {best_score}:
 
 ## Self-Check (Before Submitting Hypotheses)
 
+### Core Requirements
 Iteration {iteration_number} hypotheses must have:
 - [ ] Same CV folds as iteration 1 (verified in text)
 - [ ] Paired comparison to {best_score}
 - [ ] Explicit build-on or fix-for previous experiments
-- [ ] Distribution compliance (40% exploit, 40% innovate, 20% explore)
 - [ ] Runtime estimates based on actual iteration {prev_iter} times
 - [ ] Answers to at least one PA question
 - [ ] NO test data usage
 - [ ] NO JSON or code blocks
 - [ ] [ASSUMED] markers for any missing context
+
+### Trajectory-Aware Checks (NEW)
+- [ ] Current trajectory correctly identified (IMPROVING/PLATEAUING/DECLINING)
+- [ ] Allocation matches trajectory rules (not generic 40/40/20)
+- [ ] If PLATEAUING: At least 50% are genuinely new directions
+- [ ] If DECLINING: At least 40% are diagnostic or return-to-previous
+
+### Kill/Replace Protocol Checks
+- [ ] No hypotheses resurrect killed approaches without new evidence
+- [ ] Approaches marked for evolution have specific fixes
+- [ ] New approaches have clear rationale for why NOW
+
+### Official Score Priority Checks
+- [ ] Official scores (if available) are tracked and prioritized
+- [ ] CV vs Official gap is analyzed and acknowledged
+- [ ] If CV and Official diverge, hypotheses address the gap
+
+### Diversity Check (Even for Exploit-Heavy Iterations)
+- [ ] No more than 2 hypotheses use exact same model family
+- [ ] Each "exploit" hypothesis has a DISTINCT improvement direction
+- [ ] At least 1 hypothesis explores something not in current winners
+
+### Research Integration Check
+- [ ] Targeted research conducted for this iteration
+- [ ] At least 1 hypothesis incorporates new research findings
+- [ ] PA recommendations are addressed in at least 1 hypothesis

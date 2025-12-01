@@ -1,11 +1,32 @@
 # AutoKaggle KSE: Initial Hypothesis Generation
 
-CONTRACT (read first):
-- Goal: Generate {num_hypotheses} diverse, executable experiment hypotheses that improve leaderboard-relevant validation metrics without using test data for decisions.
-- Data Ethics: No external lookups keyed on test samples; no test-driven feature design or imputation.
-- Output Format: Use Markdown sections exactly as specified. Do NOT create any other files except the required markdown hypothesis files.
-- Determinism: Set and document random_state=42 for all operations. Document exact data split recipe in prose.
-- Time Budget: Each hypothesis must complete within 1-3 hours on standard hardware.
+CONTRACT:
+- Goal: Generate {num_hypotheses} **substantially diverse**, executable experiment hypotheses that improve leaderboard-relevant validation metrics.
+- Diversity: Hypotheses must be **globally different** (different model families, feature philosophies)—not variations.
+- Research: Use web search and discussion mining to inform hypothesis design.
+- Data Ethics: No external lookups keyed on test samples; no test-driven feature design.
+- Output Format: Use Markdown sections exactly as specified. Do NOT create other files.
+- Determinism: Set random_state=42 for all operations. Document exact data split recipe.
+
+---
+
+## PHASE 0: Mandatory Research (Before Hypothesis Generation)
+
+### Web Search Tasks (REQUIRED)
+Use available web search tools to gather:
+- **Competition-specific**: Winning solutions, top approaches for this problem type
+- **Cutting-edge**: Recent advances (last 12-24 months) in relevant ML domain
+- **Pitfalls**: Common mistakes and failed approaches
+
+### Discussion/Notebook Mining
+For each provided artifact, extract:
+- Technique used and performance achieved
+- Non-obvious insights
+- Warnings about what didn't work
+
+**Document findings in the Research Findings section below.**
+
+---
 
 ## Competition Context
 
@@ -44,6 +65,29 @@ Choose CV strategy based on data properties:
 
 ---
 
+## Research Findings (Fill After PHASE 0)
+
+### Web Search Discoveries
+Document key findings from web search:
+- **Winning techniques for this problem type:** {web_search_techniques}
+- **Recent advances (12-24 months):** {recent_advances}
+- **Common pitfalls discovered:** {pitfalls_discovered}
+
+### Discussion/Notebook Insights
+| Source | Technique | Reported Score | Key Insight | Warning |
+|--------|-----------|----------------|-------------|---------|
+| {source_1} | {technique_1} | {score_1} | {insight_1} | {warning_1} |
+| {source_2} | {technique_2} | {score_2} | {insight_2} | {warning_2} |
+| {source_3} | {technique_3} | {score_3} | {insight_3} | {warning_3} |
+
+### Techniques Worth Incorporating
+Based on research, prioritize these in hypothesis design:
+1. {technique_priority_1}: {why_promising}
+2. {technique_priority_2}: {why_promising}
+3. {technique_priority_3}: {why_promising}
+
+---
+
 ## System Specifications
 
 {system_specifications_markdown}
@@ -52,16 +96,98 @@ Choose CV strategy based on data properties:
 
 ## Hypothesis Generation Requirements
 
+### CRITICAL: Diversity Philosophy
+
+**Hypotheses must be GLOBALLY DIFFERENT, not variations.**
+
+This means:
+- Different MODEL FAMILIES (not just different hyperparameters of same model)
+- Different FEATURE PHILOSOPHIES (not just adding one feature to same pipeline)
+- Different ARCHITECTURAL APPROACHES (not just ensembling slight variants)
+
 ### Diversity Quotas (MANDATORY)
 Your {num_hypotheses} hypotheses MUST include:
 - **Baseline (1):** Simple, interpretable model for performance floor
-- **Feature Engineering Focus (2):** Domain-specific feature creation
-- **Advanced Models (2):** Modern ML techniques appropriate for data type
+- **Feature Engineering Focus (2):** Domain-specific feature creation with DIFFERENT philosophies
+- **Advanced Models (2):** Modern ML techniques appropriate for data type - DIFFERENT FAMILIES
 - **Ensemble/Stack (1):** ONLY if {num_hypotheses} >= 5, with clear complementarity
 - **Creative/Domain-Specific (1):** Novel approach tailored to this competition
 
+### Model Family Orthogonality (Required)
+Do NOT generate multiple hypotheses with the same model family:
+
+| Model Family | Examples | Can Only Appear In |
+|--------------|----------|-------------------|
+| Gradient Boosting | LightGBM, XGBoost, CatBoost | 1-2 hypotheses max |
+| Neural Networks | MLP, TabNet, FT-Transformer | 1-2 hypotheses max |
+| Linear/Regularized | Ridge, Lasso, ElasticNet, LogReg | 1 hypothesis max |
+| Tree Ensembles | Random Forest, ExtraTrees | 1 hypothesis max |
+| Instance-Based | KNN, SVM | 1 hypothesis max |
+| Meta/Stacking | StackingClassifier, VotingRegressor | 1 hypothesis max |
+
+### Feature Philosophy Divergence (Required)
+Different hypotheses should use DIFFERENT feature strategies:
+
+| Philosophy | Description | Example |
+|------------|-------------|---------|
+| Minimalist | Top-K features only, remove noise | Use top 10 features by importance |
+| Comprehensive | All features, let model select | Include all features with regularization |
+| Domain-Driven | Hand-crafted domain features | Create business-logic interactions |
+| Automated | Featuretools, autofeat, genetic | Auto-generate transformation combinations |
+| Target-Encoded | Heavy target encoding use | Target encode all categoricals |
+| Embedding-Based | Neural embeddings for categoricals | Use TabNet or Entity Embeddings |
+
+### Complexity Spectrum (Required)
+Cover different complexity levels:
+- **Simple (1-2 hypotheses):** Few hyperparameters, fast training, interpretable
+- **Medium (2-3 hypotheses):** Standard ML with tuning, reasonable complexity
+- **Complex (1-2 hypotheses):** Ensembles, stacking, neural networks, cutting-edge
+
 ### Similarity Guard
-For each hypothesis after the first, explicitly state: "**How this differs:** {key difference in model class/features/CV/regularization}"
+For each hypothesis after the first, explicitly state:
+- **Model Family Difference:** {how model family differs from others}
+- **Feature Philosophy Difference:** {how feature approach differs}
+- **Complexity Difference:** {simple/medium/complex positioning}
+
+### Diversity Matrix (REQUIRED)
+Before generating hypotheses, fill this matrix to ensure coverage:
+
+| Hypothesis | Model Family | Feature Philosophy | Complexity | Unique Element |
+|------------|--------------|-------------------|------------|----------------|
+| exp_1 | {family_1} | {philosophy_1} | {level_1} | {unique_1} |
+| exp_2 | {family_2} | {philosophy_2} | {level_2} | {unique_2} |
+| exp_3 | {family_3} | {philosophy_3} | {level_3} | {unique_3} |
+| ... | ... | ... | ... | ... |
+
+**Validation Rule:** No two hypotheses should match in more than 1 dimension (model family, feature philosophy, or complexity level).
+
+---
+
+## Complex Approaches: ENCOURAGED
+
+Do not shy away from sophisticated techniques. At least 1-2 hypotheses should include:
+
+### Cutting-Edge Techniques to Consider
+- **Stacking/Blending:** Multi-level ensembles with diverse base learners
+- **Neural Tabular Models:** TabNet, FT-Transformer, TabTransformer for tabular data
+- **Advanced Boosting:** CatBoost with ordered boosting, XGBoost with histogram-based splits
+- **Automated Feature Discovery:** Featuretools deep feature synthesis, genetic feature generation
+- **Target Encoding Variants:** CatBoost-style target encoding, leave-one-out encoding, WOE
+- **Semi-Supervised Learning:** Pseudo-labeling with confident test predictions
+- **Multi-Task Learning:** Auxiliary targets that correlate with main target
+
+### Information Sources to Mine for Complex Ideas
+1. **Kaggle Discussions:** Look for non-obvious tricks mentioned by top scorers
+2. **Competition Writeups:** Past winners' approaches for similar problem types
+3. **Recent Papers:** ArXiv papers from last 12-24 months on tabular/CV/NLP advances
+4. **Framework Changelogs:** New features in LightGBM, XGBoost, CatBoost releases
+
+### Anti-Patterns to Avoid
+- Generating 5 variations of LightGBM with slightly different hyperparameters
+- Using only tree-based models when neural approaches might excel
+- Ignoring domain-specific techniques mentioned in discussions
+- Playing it safe with only simple approaches
+- Copying generic starter notebooks without adaptation
 
 ---
 
@@ -150,11 +276,10 @@ For each hypothesis after the first, explicitly state: "**How this differs:** {k
 - Results JSON: result_{hypothesis_id}.json with score, parameters, timing
 
 ## Success Criteria
-- ✓ Completes in < {time_budget} minutes
-- ✓ Validation {metric} ≥ {minimum_acceptable_score}
-- ✓ Train-val gap < {acceptable_overfit_threshold}%
-- ✓ Output files correctly formatted
-- ✓ No test data used for decisions
+- Validation {metric} ≥ {minimum_acceptable_score}
+- Train-val gap < {acceptable_overfit_threshold}%
+- Output files correctly formatted
+- No test data used for decisions
 
 ## How to Replicate
 1. Set numpy.random.seed(42), random.seed(42), model random_state=42
@@ -168,7 +293,6 @@ For each hypothesis after the first, explicitly state: "**How this differs:** {k
 - NO test data for feature engineering or model selection
 - NO external data keyed on test samples
 - NO files created except this markdown
-- NO broad hyperparameter sweeps that can't complete in time budget
 ```
 
 ### Domain-Specific Adaptations
@@ -201,6 +325,7 @@ For each hypothesis after the first, explicitly state: "**How this differs:** {k
 
 ## Self-Check (Before Submitting Hypotheses)
 
+### Per-Hypothesis Checks
 Verify each hypothesis contains:
 - [ ] NO JSON code blocks or script files
 - [ ] Exact markdown structure as template
@@ -209,6 +334,21 @@ Verify each hypothesis contains:
 - [ ] 3-6 concrete features with leak checks
 - [ ] Tight hyperparameter ranges (no 10x10 grids)
 - [ ] Diagnostic signals for over/underfitting
-- [ ] Similarity guard stating uniqueness
+- [ ] Similarity guard stating uniqueness (model family + feature philosophy + complexity)
 - [ ] Random seeds documented
 - [ ] [ASSUMED] markers where context missing
+
+### Portfolio-Level Diversity Checks (CRITICAL)
+Before submitting, verify the ENTIRE SET of hypotheses:
+- [ ] Diversity Matrix is complete and shows no duplicate patterns
+- [ ] At least 2 different model families represented
+- [ ] At least 2 different feature philosophies represented
+- [ ] At least 1 simple, 1 medium, and 1 complex approach
+- [ ] At least 1 hypothesis incorporates insights from web search
+- [ ] At least 1 hypothesis uses a technique from discussions/notebooks
+- [ ] No two hypotheses are "the same model with different hyperparameters"
+- [ ] Research findings section is complete
+
+### Anti-Duplication Final Check
+Read through all hypotheses and ask: "If hypothesis X fails, would hypothesis Y still provide unique learning?"
+- If the answer is "no" for any pair, revise one of them to be more distinct.
