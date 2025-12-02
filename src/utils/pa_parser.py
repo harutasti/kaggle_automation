@@ -6,7 +6,10 @@ Parses structured markdown output from PA Codex into the AnalysisResult data mod
 
 import re
 import logging
-from typing import Dict, List, Any, Optional
+import yaml
+from typing import Dict, List, Any, Optional, Tuple
+
+from src.data_models import ExperimentDecision, ExperimentDecisionType
 
 logger = logging.getLogger(__name__)
 
@@ -292,3 +295,238 @@ def extract_improvement_trend(content: str) -> str:
 
     # Default to stagnant if unclear
     return "Stagnant"
+
+
+def parse_evolution_decisions(codex_output: str) -> Tuple[List[ExperimentDecision], Dict[str, Any]]:
+    """
+    Parse evolution decisions YAML block from PA output.
+
+    Expects PA output to contain a YAML block with format:
+    ```yaml
+    decisions:
+      - experiment_id: "iter1_exp1_abc123"
+        decision: CONTINUE
+        confidence: 0.85
+        reasoning: "..."
+        improvement_instructions: "..."
+        potential_ceiling: 0.82
+        priority_rank: 1
+      - experiment_id: "iter1_exp2_def456"
+        decision: TERMINATE
+        confidence: 0.90
+        reasoning: "..."
+        termination_reason: "..."
+        priority_rank: 3
+    summary:
+      continue_count: 2
+      terminate_count: 1
+      new_slots: 1
+    ```
+
+    Args:
+        codex_output: Markdown text from Codex PA analysis
+
+    Returns:
+        Tuple of (List[ExperimentDecision], summary_dict)
+
+    Raises:
+        ValueError: If YAML block cannot be found or parsed
+    """
+    decisions = []
+    summary = {}
+
+    # Find YAML code block containing "decisions:"
+    yaml_pattern = r'```yaml\s*([\s\S]*?decisions:[\s\S]*?)```'
+    match = re.search(yaml_pattern, codex_output, re.IGNORECASE)
+
+    if not match:
+        # Try alternative pattern without code fence
+        yaml_pattern_alt = r'decisions:\s*\n([\s\S]*?)(?=\n##|\n---|\Z)'
+        match_alt = re.search(yaml_pattern_alt, codex_output)
+        if match_alt:
+            yaml_content = "decisions:\n" + match_alt.group(1)
+        else:
+            raise ValueError("Could not find evolution decisions YAML block in PA output")
+    else:
+        yaml_content = match.group(1)
+
+    try:
+        parsed = yaml.safe_load(yaml_content)
+    except yaml.YAMLError as e:
+        raise ValueError(f"Failed to parse evolution decisions YAML: {e}")
+
+    if not parsed or 'decisions' not in parsed:
+        raise ValueError("YAML block does not contain 'decisions' key")
+
+    # Parse each decision
+    for decision_data in parsed.get('decisions', []):
+        try:
+            decision = _parse_single_decision(decision_data)
+            decisions.append(decision)
+        except Exception as e:
+            logger.warning(f"Failed to parse decision for {decision_data.get('experiment_id', 'unknown')}: {e}")
+            continue
+
+    # Parse summary if present
+    summary = parsed.get('summary', {})
+    if not summary:
+        # Generate summary from parsed decisions
+        summary = {
+            'continue_count': sum(1 for d in decisions if d.decision == ExperimentDecisionType.CONTINUE),
+            'terminate_count': sum(1 for d in decisions if d.decision == ExperimentDecisionType.TERMINATE),
+            'new_slots': sum(1 for d in decisions if d.decision == ExperimentDecisionType.TERMINATE)
+        }
+
+    return decisions, summary
+
+
+def _parse_single_decision(data: Dict[str, Any]) -> ExperimentDecision:
+    """
+    Parse a single experiment decision from YAML data.
+
+    Args:
+        data: Dictionary with decision fields
+
+    Returns:
+        ExperimentDecision object
+
+    Raises:
+        ValueError: If required fields are missing or invalid
+    """
+    # Required fields
+    experiment_id = data.get('experiment_id')
+    if not experiment_id:
+        raise ValueError("Missing required field: experiment_id")
+
+    decision_str = data.get('decision', '').upper()
+    if decision_str not in ('CONTINUE', 'TERMINATE'):
+        raise ValueError(f"Invalid decision value: {decision_str}. Must be CONTINUE or TERMINATE")
+
+    decision_type = ExperimentDecisionType.CONTINUE if decision_str == 'CONTINUE' else ExperimentDecisionType.TERMINATE
+
+    reasoning = data.get('reasoning', '')
+    if not reasoning:
+        raise ValueError("Missing required field: reasoning")
+
+    confidence = float(data.get('confidence', 0.5))
+    if not 0.0 <= confidence <= 1.0:
+        logger.warning(f"Confidence {confidence} out of range [0, 1], clamping")
+        confidence = max(0.0, min(1.0, confidence))
+
+    # Optional fields
+    improvement_instructions = data.get('improvement_instructions')
+    termination_reason = data.get('termination_reason')
+    potential_ceiling = data.get('potential_ceiling')
+    if potential_ceiling is not None:
+        potential_ceiling = float(potential_ceiling)
+
+    priority_rank = int(data.get('priority_rank', 0))
+
+    return ExperimentDecision(
+        experiment_id=experiment_id,
+        decision=decision_type,
+        reasoning=reasoning,
+        confidence=confidence,
+        improvement_instructions=improvement_instructions,
+        termination_reason=termination_reason,
+        potential_ceiling=potential_ceiling,
+        priority_rank=priority_rank
+    )
+
+
+def validate_evolution_decisions(
+    decisions: List[ExperimentDecision],
+    expected_experiment_ids: List[str]
+) -> Tuple[bool, List[str]]:
+    """
+    Validate that evolution decisions cover all expected experiments.
+
+    Args:
+        decisions: List of parsed ExperimentDecision objects
+        expected_experiment_ids: List of experiment IDs that should have decisions
+
+    Returns:
+        Tuple of (is_valid, list_of_issues)
+    """
+    issues = []
+
+    # Get IDs from decisions
+    decision_ids = {d.experiment_id for d in decisions}
+    expected_ids = set(expected_experiment_ids)
+
+    # Check for missing decisions
+    missing = expected_ids - decision_ids
+    if missing:
+        issues.append(f"Missing decisions for experiments: {sorted(missing)}")
+
+    # Check for extra decisions (not necessarily an error, but worth noting)
+    extra = decision_ids - expected_ids
+    if extra:
+        issues.append(f"Unexpected decisions for experiments: {sorted(extra)}")
+
+    # Check that CONTINUE decisions have improvement_instructions
+    for decision in decisions:
+        if decision.decision == ExperimentDecisionType.CONTINUE:
+            if not decision.improvement_instructions:
+                issues.append(f"CONTINUE decision for {decision.experiment_id} missing improvement_instructions")
+
+        if decision.decision == ExperimentDecisionType.TERMINATE:
+            if not decision.termination_reason and not decision.reasoning:
+                issues.append(f"TERMINATE decision for {decision.experiment_id} missing termination_reason")
+
+    is_valid = len(issues) == 0
+    return is_valid, issues
+
+
+def generate_decision_retry_prompt(issues: List[str], original_output: str) -> str:
+    """
+    Generate a prompt to retry decision generation when validation fails.
+
+    Args:
+        issues: List of validation issues
+        original_output: The original PA output that failed validation
+
+    Returns:
+        Prompt string for retrying decision generation
+    """
+    issues_text = "\n".join(f"- {issue}" for issue in issues)
+
+    return f"""Your previous evolution decisions output had validation issues:
+
+{issues_text}
+
+Please provide corrected evolution decisions in the following EXACT YAML format:
+
+```yaml
+decisions:
+  - experiment_id: "<exact experiment ID>"
+    decision: CONTINUE  # or TERMINATE
+    confidence: 0.85  # 0.0-1.0
+    reasoning: "Why this decision was made"
+    improvement_instructions: |  # Required for CONTINUE
+      1. First improvement
+      2. Second improvement
+    potential_ceiling: 0.82  # Optional: estimated max score
+    priority_rank: 1  # 1=highest priority
+
+  - experiment_id: "<another experiment ID>"
+    decision: TERMINATE
+    confidence: 0.90
+    reasoning: "Why terminating"
+    termination_reason: "Specific reason for termination"
+    priority_rank: 3
+
+summary:
+  continue_count: <number of CONTINUE decisions>
+  terminate_count: <number of TERMINATE decisions>
+  new_slots: <same as terminate_count>
+```
+
+CRITICAL REQUIREMENTS:
+1. Every experiment must have exactly one decision
+2. CONTINUE decisions MUST have improvement_instructions
+3. TERMINATE decisions SHOULD have termination_reason
+4. Confidence must be between 0.0 and 1.0
+5. Use exact experiment IDs as provided in the results
+
+Please output ONLY the corrected YAML block."""

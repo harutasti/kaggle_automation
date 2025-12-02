@@ -1,6 +1,40 @@
 import dataclasses
 from typing import List, Dict, Optional, Any
+from enum import Enum
 import datetime
+
+
+class ExperimentDecisionType(Enum):
+    """PA's decision for whether to continue or terminate an experiment."""
+    CONTINUE = "CONTINUE"   # Keep worktree, evolve experiment with improvements
+    TERMINATE = "TERMINATE" # Archive worktree, free slot for new hypothesis
+
+
+@dataclasses.dataclass
+class ExperimentDecision:
+    """PA's explicit decision for a single experiment."""
+    experiment_id: str
+    decision: ExperimentDecisionType
+    reasoning: str                                   # Why continue or terminate
+    confidence: float                                # 0.0-1.0 confidence in decision
+    improvement_instructions: Optional[str] = None   # For CONTINUE: what to improve
+    termination_reason: Optional[str] = None         # For TERMINATE: why it failed
+    potential_ceiling: Optional[float] = None        # Estimated max achievable score
+    priority_rank: int = 0                           # 1=highest priority to continue
+
+
+@dataclasses.dataclass
+class ContinuationHypothesis:
+    """Hypothesis that continues/evolves an existing experiment."""
+    experiment_id: str                  # Original experiment ID (preserved for lineage)
+    continuation_id: str                # New ID for this iteration's continuation
+    iteration: int
+    original_strategy_name: str
+    improvement_instructions: str       # From PA's analysis
+    new_parameters: Dict[str, Any]      # Updated parameters
+    worktree_path: str                  # Existing worktree to reuse
+    task_markdown_path: str             # New task markdown for this continuation
+    parent_score: float                 # Score from parent experiment
 
 @dataclasses.dataclass
 class CompetitionInfo:
@@ -68,3 +102,9 @@ class AnalysisResult:
     # Key insights
     top_discoveries: List[str] = dataclasses.field(default_factory=list)
     critical_decisions: List[str] = dataclasses.field(default_factory=list)
+
+    # Evolution decisions (for persistent evolution feature)
+    experiment_decisions: List['ExperimentDecision'] = dataclasses.field(default_factory=list)
+    experiments_to_continue: int = 0
+    experiments_to_terminate: int = 0
+    new_slots_available: int = 0

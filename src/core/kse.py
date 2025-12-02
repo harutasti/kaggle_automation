@@ -4,10 +4,13 @@ import random
 import json
 import re
 from pathlib import Path
-from typing import List, Optional, Dict, Any
+from typing import List, Optional, Dict, Any, Tuple
 
 from .base_component import BaseComponent
-from ..data_models import CompetitionInfo, ExperimentHypothesis, ExperimentResult, AnalysisResult
+from ..data_models import (
+    CompetitionInfo, ExperimentHypothesis, ExperimentResult, AnalysisResult,
+    ContinuationHypothesis, ExperimentDecision, ExperimentDecisionType
+)
 from ..utils.file_utils import write_markdown, ensure_dir
 from ..utils.crawler_parser import parse_discussion_strategies
 from ..utils.dataset_analyzer import DatasetAnalyzer
@@ -365,23 +368,23 @@ class KnowledgeStrategyEngine(BaseComponent):
         self.logger.info(f"Saved filled prompt to {prompt_path}")
 
         # Execute Codex to fill templates
-            codex_responses_dir = os.path.join(self.experiment_run_dir, "codex-responses")
-            try:
-                use_resume = iteration > 0
-                run_label = "initial" if iteration == 0 else "resume"
-                resume_prompt = filled_prompt if use_resume else None
-                codex_result = execute_codex(
-                    mode=CodexMode.KSE,
-                    prompt_content=filled_prompt,
-                    output_dir=str(iteration_dir),
-                    iteration=iteration,
-                    codex_responses_dir=codex_responses_dir,
-                    timeout=self.codex_timeout,
-                    logger=self.logger,
-                    resume_prompt=resume_prompt,
-                    run_label=run_label
-                )
-            except Exception as e:
+        codex_responses_dir = os.path.join(self.experiment_run_dir, "codex-responses")
+        try:
+            use_resume = iteration > 0
+            run_label = "initial" if iteration == 0 else "resume"
+            resume_prompt = filled_prompt if use_resume else None
+            codex_result = execute_codex(
+                mode=CodexMode.KSE,
+                prompt_content=filled_prompt,
+                output_dir=str(iteration_dir),
+                iteration=iteration,
+                codex_responses_dir=codex_responses_dir,
+                timeout=self.codex_timeout,
+                logger=self.logger,
+                resume_prompt=resume_prompt,
+                run_label=run_label
+            )
+        except Exception as e:
             self.logger.error(f"Error calling Codex for KSE: {e}")
             codex_result = CodexResult(
                 success=False,
@@ -1008,3 +1011,328 @@ Based on discussion analysis, here are relevant insights for this strategy:
 
         # The allocator generates complete, context-aware instructions
         return allocation.prompt_instructions
+
+    # ========== Evolution Hypothesis Generation ==========
+
+    def generate_evolution_hypotheses(
+        self,
+        competition_info: CompetitionInfo,
+        current_iteration: int,
+        num_hypotheses: int,
+        analysis_result: AnalysisResult,
+        previous_results: List[ExperimentResult],
+        persistent_experiments: Dict[str, str],  # {exp_id: worktree_path}
+        official_scores: Optional[Dict[str, float]] = None
+    ) -> Tuple[List[ContinuationHypothesis], List[ExperimentHypothesis]]:
+        """
+        Generate evolution hypotheses based on PA decisions.
+
+        Separates experiments into:
+        - ContinuationHypothesis: For experiments marked CONTINUE (reuse existing worktree)
+        - ExperimentHypothesis: For freed slots from TERMINATE decisions (new worktree)
+
+        Args:
+            competition_info: Competition information
+            current_iteration: Current iteration number
+            num_hypotheses: Total number of experiments to run (maintain configured count)
+            analysis_result: AnalysisResult with experiment_decisions populated
+            previous_results: List of previous experiment results
+            persistent_experiments: Dict mapping experiment_id to worktree_path
+            official_scores: Optional official scores
+
+        Returns:
+            Tuple of (continuation_hypotheses, new_hypotheses)
+        """
+        method_name = "generate_evolution_hypotheses"
+        self._log_start(method_name, iteration=current_iteration, num_hypotheses=num_hypotheses)
+
+        continuation_hypotheses: List[ContinuationHypothesis] = []
+        new_hypotheses: List[ExperimentHypothesis] = []
+
+        # Get decisions from analysis
+        decisions = analysis_result.experiment_decisions
+        if not decisions:
+            self.logger.warning("No evolution decisions found, falling back to standard hypothesis generation")
+            new_hypotheses = self.generate_next_hypotheses(
+                competition_info, current_iteration, num_hypotheses,
+                analysis_result, previous_results, official_scores
+            )
+            return continuation_hypotheses, new_hypotheses
+
+        # Separate CONTINUE and TERMINATE decisions
+        continue_decisions = [d for d in decisions if d.decision == ExperimentDecisionType.CONTINUE]
+        terminate_decisions = [d for d in decisions if d.decision == ExperimentDecisionType.TERMINATE]
+
+        self.logger.info(
+            f"Evolution: {len(continue_decisions)} CONTINUE, {len(terminate_decisions)} TERMINATE"
+        )
+
+        # Create continuation hypotheses for CONTINUE decisions
+        for decision in continue_decisions:
+            exp_id = decision.experiment_id
+            worktree_path = persistent_experiments.get(exp_id)
+
+            if not worktree_path:
+                self.logger.warning(f"No worktree found for {exp_id}, treating as TERMINATE")
+                terminate_decisions.append(decision)
+                continue
+
+            # Find the previous result for this experiment
+            prev_result = next((r for r in previous_results if r.experiment_id == exp_id), None)
+            if not prev_result:
+                self.logger.warning(f"No previous result found for {exp_id}")
+                continue
+
+            continuation = self._create_continuation_hypothesis(
+                decision=decision,
+                iteration=current_iteration,
+                worktree_path=worktree_path,
+                prev_result=prev_result,
+                competition_info=competition_info,
+                total_waas=num_hypotheses
+            )
+            continuation_hypotheses.append(continuation)
+
+        # Calculate how many new hypotheses we need
+        slots_for_new = num_hypotheses - len(continuation_hypotheses)
+        self.logger.info(f"Creating {slots_for_new} new hypotheses for freed slots")
+
+        if slots_for_new > 0:
+            # Generate new hypotheses for freed slots
+            # Include context about what was terminated and why
+            terminated_context = self._build_termination_context(terminate_decisions)
+
+            new_hypotheses = self._generate_new_hypotheses_for_slots(
+                competition_info=competition_info,
+                current_iteration=current_iteration,
+                num_new=slots_for_new,
+                analysis_result=analysis_result,
+                previous_results=previous_results,
+                official_scores=official_scores,
+                terminated_context=terminated_context
+            )
+
+        self._log_end(
+            method_name,
+            result=f"{len(continuation_hypotheses)} continuations, {len(new_hypotheses)} new"
+        )
+        return continuation_hypotheses, new_hypotheses
+
+    def _create_continuation_hypothesis(
+        self,
+        decision: ExperimentDecision,
+        iteration: int,
+        worktree_path: str,
+        prev_result: ExperimentResult,
+        competition_info: CompetitionInfo,
+        total_waas: int
+    ) -> ContinuationHypothesis:
+        """
+        Create a ContinuationHypothesis from a CONTINUE decision.
+
+        Args:
+            decision: The CONTINUE decision from PA
+            iteration: Current iteration number
+            worktree_path: Path to existing worktree
+            prev_result: Previous experiment result
+            competition_info: Competition information
+            total_waas: Total number of WAAs running in parallel
+
+        Returns:
+            ContinuationHypothesis object
+        """
+        exp_id = decision.experiment_id
+        continuation_id = f"iter{iteration}_cont_{exp_id.split('_')[-1]}"
+
+        # Generate continuation task markdown
+        task_markdown = self._generate_continuation_task_markdown(
+            decision=decision,
+            continuation_id=continuation_id,
+            prev_result=prev_result,
+            competition_info=competition_info,
+            total_waas=total_waas
+        )
+
+        # Save task markdown
+        task_md_path = Path(self.hypothesis_dir) / f"iter{iteration}" / f"{continuation_id}_task.md"
+        task_md_path.parent.mkdir(parents=True, exist_ok=True)
+        task_md_path.write_text(task_markdown, encoding="utf-8")
+
+        return ContinuationHypothesis(
+            experiment_id=exp_id,  # Original ID preserved
+            continuation_id=continuation_id,
+            iteration=iteration,
+            original_strategy_name=prev_result.strategy_name,
+            improvement_instructions=decision.improvement_instructions or "",
+            new_parameters=prev_result.parameters or {},
+            worktree_path=worktree_path,
+            task_markdown_path=str(task_md_path),
+            parent_score=prev_result.score or 0.0
+        )
+
+    def _generate_continuation_task_markdown(
+        self,
+        decision: ExperimentDecision,
+        continuation_id: str,
+        prev_result: ExperimentResult,
+        competition_info: CompetitionInfo,
+        total_waas: int
+    ) -> str:
+        """
+        Generate task markdown for a continuation experiment.
+
+        This provides context about the parent experiment and PA's improvement instructions.
+        """
+        # Load continuation template if available
+        template_path = Path(self.prompts_dir) / "KSE" / "kse_continuation_template.md"
+
+        if template_path.exists():
+            template = template_path.read_text(encoding="utf-8")
+            # Fill placeholders
+            filled = template.replace("{{CONTINUATION_ID}}", continuation_id)
+            filled = filled.replace("{{ORIGINAL_EXP_ID}}", decision.experiment_id)
+            filled = filled.replace("{{ORIGINAL_STRATEGY}}", prev_result.strategy_name)
+            filled = filled.replace("{{PARENT_SCORE}}", f"{prev_result.score:.4f}" if prev_result.score else "N/A")
+            filled = filled.replace("{{IMPROVEMENT_INSTRUCTIONS}}", decision.improvement_instructions or "No specific instructions")
+            filled = filled.replace("{{REASONING}}", decision.reasoning)
+            filled = filled.replace("{{POTENTIAL_CEILING}}", f"{decision.potential_ceiling:.4f}" if decision.potential_ceiling else "Unknown")
+            filled = filled.replace("{{COMPETITION_NAME}}", competition_info.name)
+            filled = filled.replace("{{EVALUATION_METRIC}}", competition_info.evaluation_metric)
+
+            # Wrap with WAA template
+            waa_template = self._load_waa_template()
+            gpu_section = self._get_gpu_instructions_section(continuation_id, total_waas)
+            return waa_template.format(
+                gpu_allocation_section=gpu_section,
+                task_content=filled,
+                exp_id=continuation_id
+            )
+        else:
+            # Generate inline continuation task
+            return self._generate_inline_continuation_task(
+                decision=decision,
+                continuation_id=continuation_id,
+                prev_result=prev_result,
+                competition_info=competition_info,
+                total_waas=total_waas
+            )
+
+    def _generate_inline_continuation_task(
+        self,
+        decision: ExperimentDecision,
+        continuation_id: str,
+        prev_result: ExperimentResult,
+        competition_info: CompetitionInfo,
+        total_waas: int
+    ) -> str:
+        """Generate continuation task markdown without external template."""
+        task_content = f"""# Continuation Experiment: {continuation_id}
+
+## Context: Building on Previous Success
+
+This is a **CONTINUATION** of experiment `{decision.experiment_id}`.
+
+### Parent Experiment Summary
+- **Original Strategy:** {prev_result.strategy_name}
+- **Previous Score:** {prev_result.score:.4f if prev_result.score else 'N/A'}
+- **Potential Ceiling:** {decision.potential_ceiling:.4f if decision.potential_ceiling else 'Unknown'}
+
+### Why Continuing This Experiment
+{decision.reasoning}
+
+---
+
+## PA's Improvement Instructions (FOLLOW THESE)
+
+{decision.improvement_instructions or 'No specific instructions provided - use your judgment to improve.'}
+
+---
+
+## Your Task
+
+1. **Review** the existing code and results in this worktree
+2. **Implement** the improvements specified above
+3. **Do NOT** start from scratch - build on what exists
+4. **Maintain** the same CV scheme for comparability
+5. **Document** what changes you made and why
+
+## Expected Outputs
+
+- `result_{continuation_id}.json` with the new validation score
+- `submission_{continuation_id}.csv` in competition format
+- `waa_{continuation_id}.log` with implementation details
+- `DONE_{continuation_id}` marker when complete
+
+## Success Criteria
+
+- Score improves from {prev_result.score:.4f if prev_result.score else 'baseline'}
+- Changes are well-documented
+- Implementation follows PA's instructions
+- Outputs are correctly formatted
+
+---
+
+**Competition:** {competition_info.name}
+**Metric:** {competition_info.evaluation_metric}
+"""
+
+        # Wrap with WAA template
+        waa_template = self._load_waa_template()
+        gpu_section = self._get_gpu_instructions_section(continuation_id, total_waas)
+        return waa_template.format(
+            gpu_allocation_section=gpu_section,
+            task_content=task_content,
+            exp_id=continuation_id
+        )
+
+    def _build_termination_context(self, terminate_decisions: List[ExperimentDecision]) -> str:
+        """Build context about terminated experiments for new hypothesis generation."""
+        if not terminate_decisions:
+            return "No experiments were terminated."
+
+        lines = ["## Terminated Experiments (Do NOT repeat these approaches)\n"]
+        for decision in terminate_decisions:
+            lines.append(f"### {decision.experiment_id}")
+            lines.append(f"- **Reason:** {decision.termination_reason or decision.reasoning}")
+            lines.append(f"- **Confidence:** {decision.confidence:.2f}")
+            lines.append("")
+
+        lines.append("\n**Important:** Generate NEW approaches that avoid the pitfalls above.")
+        return "\n".join(lines)
+
+    def _generate_new_hypotheses_for_slots(
+        self,
+        competition_info: CompetitionInfo,
+        current_iteration: int,
+        num_new: int,
+        analysis_result: AnalysisResult,
+        previous_results: List[ExperimentResult],
+        official_scores: Optional[Dict[str, float]],
+        terminated_context: str
+    ) -> List[ExperimentHypothesis]:
+        """
+        Generate new hypotheses for slots freed by TERMINATE decisions.
+
+        Includes context about what was terminated to avoid repeating failures.
+        """
+        self.logger.info(f"Generating {num_new} new hypotheses for freed slots")
+
+        if self.use_codex_for_generation:
+            # Use Codex with termination context
+            return self._generate_hypotheses_with_codex(
+                competition_info=competition_info,
+                num_hypotheses=num_new,
+                iteration=current_iteration,
+                is_initial=False,
+                analysis_result=analysis_result,
+                previous_results=previous_results,
+                official_scores=official_scores
+            )
+        else:
+            # Fallback to programmatic generation
+            return self._generate_programmatic_hypotheses(
+                iteration=current_iteration,
+                num_hypotheses=num_new,
+                competition_info=competition_info,
+                previous_results=previous_results
+            )

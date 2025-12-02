@@ -8,8 +8,10 @@ import json
 from typing import List, Dict, Tuple, Optional
 import git # GitPython
 
+import datetime
+
 from ..core.base_component import BaseComponent
-from ..data_models import ExperimentHypothesis
+from ..data_models import ExperimentHypothesis, ContinuationHypothesis
 from ..utils.file_utils import ensure_dir, remove_dir
 from .codex_launcher import CodexExperimentLauncher
 from .session_manager import SessionManager, SessionStatus
@@ -707,6 +709,277 @@ Please execute the experiment exactly as described above. Ensure you:
             self.logger.error(f"Git command failed during cleanup for {exp_id}: {e.stderr}")
         except Exception as e:
             self._log_error(method_name, e)
+
+    # ========== Evolution: Continuation Launching and Archival ==========
+
+    def launch_continuation_experiments(
+        self,
+        continuations: List[ContinuationHypothesis],
+        total_waas: int
+    ) -> Dict[str, any]:
+        """
+        Launch continuation experiments that REUSE existing worktrees.
+
+        Unlike launch_experiments(), this does NOT create new worktrees.
+        Instead, it:
+        1. Copies the new task markdown to the existing worktree
+        2. Resets the experiment status
+        3. Launches Codex with resume context
+
+        Args:
+            continuations: List of ContinuationHypothesis objects
+            total_waas: Total number of WAAs running (for GPU allocation)
+
+        Returns:
+            Dict with keys: 'launched', 'failed', 'total'
+        """
+        method_name = "launch_continuation_experiments"
+        self._log_start(method_name, num_continuations=len(continuations))
+        launched_ids = []
+        failed_launches = []
+
+        for continuation in continuations:
+            cont_id = continuation.continuation_id
+            exp_id = continuation.experiment_id  # Original experiment ID
+            worktree_path = continuation.worktree_path
+
+            try:
+                # Validate worktree exists
+                if not os.path.exists(worktree_path):
+                    raise FileNotFoundError(f"Worktree not found: {worktree_path}")
+
+                # Copy new task markdown to worktree
+                task_src = continuation.task_markdown_path
+                task_dst = os.path.join(worktree_path, f"{cont_id}_task.md")
+                if os.path.exists(task_src):
+                    shutil.copy2(task_src, task_dst)
+                    self.logger.info(f"Copied continuation task to {task_dst}")
+
+                # Reset experiment status for continuation
+                self.session_manager.create_status_file(worktree_path, cont_id)
+                self.logger.info(f"Reset status file for continuation: {cont_id}")
+
+                # Save continuation metadata
+                metadata = {
+                    "continuation_id": cont_id,
+                    "original_experiment_id": exp_id,
+                    "iteration": continuation.iteration,
+                    "original_strategy": continuation.original_strategy_name,
+                    "parent_score": continuation.parent_score,
+                    "improvement_instructions": continuation.improvement_instructions,
+                    "timestamp": datetime.datetime.now().isoformat()
+                }
+                metadata_path = os.path.join(worktree_path, f"continuation_{cont_id}.json")
+                with open(metadata_path, 'w') as f:
+                    json.dump(metadata, f, indent=2)
+
+                # Launch experiment using Codex or simulator
+                if self.simulation_mode:
+                    # Simulation mode
+                    process = self._launch_simulation_process(cont_id, worktree_path, task_dst)
+                else:
+                    # Codex mode - use resume with continuation context
+                    process = self._launch_continuation_codex(continuation, worktree_path, task_dst, total_waas)
+
+                if process:
+                    self.active_processes[cont_id] = (process, worktree_path)
+                    launched_ids.append(cont_id)
+                    self.logger.info(f"Launched continuation {cont_id} in existing worktree {worktree_path}")
+                else:
+                    failed_launches.append({"exp_id": cont_id, "reason": "Process launch returned None"})
+
+            except Exception as e:
+                self.logger.error(f"Failed to launch continuation {cont_id}: {e}")
+                failed_launches.append({"exp_id": cont_id, "reason": str(e)})
+
+        result = {
+            "launched": launched_ids,
+            "failed": failed_launches,
+            "total": len(continuations)
+        }
+        self._log_end(method_name, result=result)
+        return result
+
+    def _launch_continuation_codex(
+        self,
+        continuation: ContinuationHypothesis,
+        worktree_path: str,
+        task_path: str,
+        total_waas: int
+    ) -> Optional[subprocess.Popen]:
+        """Launch Codex for a continuation experiment with resume context."""
+        if not self.codex_launcher:
+            self.logger.error("Codex launcher not initialized")
+            return None
+
+        cont_id = continuation.continuation_id
+
+        # Build continuation context for Codex
+        context = f"""This is a CONTINUATION experiment building on {continuation.experiment_id}.
+
+Parent experiment achieved score: {continuation.parent_score:.4f}
+
+PA's improvement instructions:
+{continuation.improvement_instructions}
+
+Your task: Implement these improvements in the existing codebase.
+DO NOT start from scratch - build on what exists.
+
+Output files should use the continuation ID: {cont_id}
+"""
+
+        # Get GPU allocation
+        waa_index = GPUAllocator.parse_waa_index(cont_id)
+        allocation = self.gpu_allocator.allocate(waa_index, total_waas)
+
+        try:
+            # Launch Codex with the task and context
+            process = self.codex_launcher.launch_experiment(
+                exp_id=cont_id,
+                worktree_path=worktree_path,
+                task_markdown_path=task_path,
+                gpu_allocation=allocation,
+                context=context
+            )
+            return process
+        except Exception as e:
+            self.logger.error(f"Failed to launch Codex for continuation {cont_id}: {e}")
+            return None
+
+    def _launch_simulation_process(
+        self,
+        exp_id: str,
+        worktree_path: str,
+        task_path: str
+    ) -> Optional[subprocess.Popen]:
+        """Launch simulation process for a continuation experiment."""
+        try:
+            process = subprocess.Popen(
+                ['python', self.wca_simulator_script, exp_id, worktree_path, task_path],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                cwd=worktree_path
+            )
+            return process
+        except Exception as e:
+            self.logger.error(f"Failed to launch simulation for {exp_id}: {e}")
+            return None
+
+    def archive_worktree(
+        self,
+        exp_id: str,
+        worktree_path: str,
+        termination_reason: Optional[str] = None
+    ) -> Optional[str]:
+        """
+        Archive a terminated experiment's worktree instead of deleting it.
+
+        Moves the worktree to archived_experiments/ directory with metadata.
+
+        Args:
+            exp_id: Experiment ID
+            worktree_path: Path to the worktree
+            termination_reason: Optional reason for termination
+
+        Returns:
+            Archive path if successful, None otherwise
+        """
+        method_name = "archive_worktree"
+        self._log_start(method_name, exp_id=exp_id, path=worktree_path)
+
+        try:
+            # Create archive directory
+            archive_base = os.path.join(self.experiment_run_dir, "archived_experiments")
+            ensure_dir(archive_base)
+
+            # Generate archive name with timestamp
+            timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+            archive_name = f"{exp_id}_archived_{timestamp}"
+            archive_path = os.path.join(archive_base, archive_name)
+
+            # Create archive metadata
+            metadata = {
+                "experiment_id": exp_id,
+                "original_path": worktree_path,
+                "archived_at": datetime.datetime.now().isoformat(),
+                "termination_reason": termination_reason,
+                "archive_path": archive_path
+            }
+
+            # First, remove git worktree association (but keep files)
+            try:
+                self.repo.git.worktree('remove', '--force', worktree_path)
+                self.logger.info(f"Removed git worktree association for {exp_id}")
+            except git.GitCommandError as e:
+                self.logger.warning(f"Could not remove worktree association: {e}")
+
+            # Prune worktree metadata
+            try:
+                self.repo.git.worktree('prune')
+            except git.GitCommandError:
+                pass
+
+            # Delete the experiment branch
+            try:
+                branch_name = f"exp/{exp_id}"
+                self.repo.git.branch('-D', branch_name)
+                self.logger.info(f"Deleted branch {branch_name}")
+            except git.GitCommandError as e:
+                self.logger.warning(f"Could not delete branch: {e}")
+
+            # Move worktree to archive
+            if os.path.exists(worktree_path):
+                shutil.move(worktree_path, archive_path)
+                self.logger.info(f"Moved worktree to archive: {archive_path}")
+
+                # Save archive metadata
+                metadata_path = os.path.join(archive_path, "archive_metadata.json")
+                with open(metadata_path, 'w') as f:
+                    json.dump(metadata, f, indent=2)
+
+                self._log_end(method_name, result=archive_path)
+                return archive_path
+            else:
+                self.logger.warning(f"Worktree path does not exist: {worktree_path}")
+                return None
+
+        except Exception as e:
+            self._log_error(method_name, e)
+            return None
+
+    def get_active_worktree_paths(self) -> Dict[str, str]:
+        """
+        Get all active worktree paths.
+
+        Returns:
+            Dict mapping experiment_id to worktree_path
+        """
+        worktree_map = {}
+        try:
+            # List all worktrees managed by git
+            worktree_list = self.repo.git.worktree('list', '--porcelain')
+            current_path = None
+            current_branch = None
+
+            for line in worktree_list.splitlines():
+                if line.startswith('worktree '):
+                    current_path = line[9:]  # Remove 'worktree ' prefix
+                elif line.startswith('branch refs/heads/exp/'):
+                    current_branch = line[22:]  # Extract exp_id from branch name
+                    if current_path and current_branch and self.worktree_base_dir in current_path:
+                        # This is one of our managed worktrees
+                        worktree_map[current_branch] = current_path
+                    current_path = None
+                    current_branch = None
+                elif line == '':
+                    # Reset for next worktree entry
+                    current_path = None
+                    current_branch = None
+
+        except Exception as e:
+            self.logger.error(f"Failed to list worktrees: {e}")
+
+        return worktree_map
 
     def get_worktree_path(self, exp_id: str) -> Optional[str]:
         """Return the worktree path for a given experiment ID."""

@@ -5,10 +5,13 @@ import json
 from pathlib import Path
 
 from ..core.base_component import BaseComponent
-from ..data_models import ExperimentResult, AnalysisResult
+from ..data_models import ExperimentResult, AnalysisResult, ExperimentDecision, ExperimentDecisionType
 from ..utils.file_utils import write_markdown, ensure_dir
 from ..utils.codex_executor import CodexMode, execute_codex
-from ..utils.pa_parser import parse_pa_codex_output, extract_best_score_info, extract_improvement_trend
+from ..utils.pa_parser import (
+    parse_pa_codex_output, extract_best_score_info, extract_improvement_trend,
+    parse_evolution_decisions, validate_evolution_decisions, generate_decision_retry_prompt
+)
 from ..utils.prompt_filler import PromptFiller
 
 class PerformanceAnalyzer(BaseComponent):
@@ -311,3 +314,300 @@ class PerformanceAnalyzer(BaseComponent):
                 f"- {r.experiment_id} | strategy={r.strategy_name} | cv_score={cv_str} | official_score={official_str} | status={r.status} | params={json.dumps(r.parameters) if r.parameters else '{}'}"
             )
         return "\n".join(lines)
+
+    def analyze_with_evolution_decisions(
+        self,
+        iteration: int,
+        results: List[ExperimentResult],
+        official_scores: Optional[Dict[str, float]] = None
+    ) -> AnalysisResult:
+        """
+        Analyze results AND generate evolution decisions for each experiment.
+
+        This is the main entry point for persistent evolution mode. It:
+        1. Performs standard analysis
+        2. Generates CONTINUE/TERMINATE decisions for each experiment
+        3. Retries until valid decisions are obtained
+
+        Args:
+            iteration: Current iteration number
+            results: List of experiment results
+            official_scores: Optional dict mapping experiment_id to official Kaggle score
+
+        Returns:
+            AnalysisResult with experiment_decisions populated
+        """
+        # First, perform standard analysis
+        analysis = self.analyze_results(iteration, results, official_scores)
+
+        # If Codex is not enabled, skip evolution decisions
+        if not self.use_codex:
+            self.logger.warning("Codex not enabled, skipping evolution decisions")
+            return analysis
+
+        # Get evolution decisions with retry logic
+        try:
+            experiment_ids = [r.experiment_id for r in results]
+            decisions = self._get_evolution_decisions_with_retry(
+                iteration, results, analysis, official_scores, experiment_ids
+            )
+
+            # Populate analysis with decisions
+            analysis.experiment_decisions = decisions
+            analysis.experiments_to_continue = sum(
+                1 for d in decisions if d.decision == ExperimentDecisionType.CONTINUE
+            )
+            analysis.experiments_to_terminate = sum(
+                1 for d in decisions if d.decision == ExperimentDecisionType.TERMINATE
+            )
+            analysis.new_slots_available = analysis.experiments_to_terminate
+
+            self.logger.info(
+                f"Evolution decisions: {analysis.experiments_to_continue} CONTINUE, "
+                f"{analysis.experiments_to_terminate} TERMINATE"
+            )
+
+            # Save decisions to file for debugging
+            self._save_evolution_decisions(iteration, decisions)
+
+        except Exception as e:
+            self.logger.error(f"Failed to get evolution decisions: {e}")
+            # Leave experiment_decisions empty, caller will need to handle
+
+        return analysis
+
+    def _get_evolution_decisions_with_retry(
+        self,
+        iteration: int,
+        results: List[ExperimentResult],
+        analysis: AnalysisResult,
+        official_scores: Optional[Dict[str, float]],
+        expected_experiment_ids: List[str]
+    ) -> List[ExperimentDecision]:
+        """
+        Get evolution decisions from PA, retrying until valid output is obtained.
+
+        Args:
+            iteration: Current iteration number
+            results: List of experiment results
+            analysis: Basic analysis result
+            official_scores: Optional official scores
+            expected_experiment_ids: List of experiment IDs that need decisions
+
+        Returns:
+            List of ExperimentDecision objects
+
+        Raises:
+            RuntimeError: If unable to get valid decisions after many retries
+        """
+        max_retries = 100  # Keep retrying as per user preference
+        retry_count = 0
+
+        # Get initial PA output with evolution decisions prompt
+        codex_output = self._get_pa_output_with_decisions(iteration, results, analysis, official_scores)
+
+        while retry_count < max_retries:
+            try:
+                # Try to parse evolution decisions
+                decisions, summary = parse_evolution_decisions(codex_output)
+
+                # Validate decisions
+                is_valid, issues = validate_evolution_decisions(decisions, expected_experiment_ids)
+
+                if is_valid:
+                    self.logger.info(f"Successfully parsed evolution decisions after {retry_count} retries")
+                    return decisions
+
+                # Invalid - generate retry prompt and continue
+                self.logger.warning(f"Evolution decisions validation failed: {issues}")
+                retry_prompt = generate_decision_retry_prompt(issues, codex_output)
+
+                # Resume PA with retry prompt
+                codex_output = self._resume_pa_for_decisions(iteration, retry_prompt)
+                retry_count += 1
+
+            except ValueError as e:
+                # Parsing failed completely
+                self.logger.warning(f"Failed to parse evolution decisions: {e}")
+                retry_prompt = generate_decision_retry_prompt([str(e)], codex_output)
+                codex_output = self._resume_pa_for_decisions(iteration, retry_prompt)
+                retry_count += 1
+
+        # Should not reach here with max_retries=100, but just in case
+        raise RuntimeError(f"Failed to get valid evolution decisions after {max_retries} retries")
+
+    def _get_pa_output_with_decisions(
+        self,
+        iteration: int,
+        results: List[ExperimentResult],
+        analysis: AnalysisResult,
+        official_scores: Optional[Dict[str, float]]
+    ) -> str:
+        """
+        Get PA Codex output that includes evolution decisions.
+
+        Returns the raw Codex output text.
+        """
+        # Prepare prompt with evolution decisions requirement
+        prompt = self._prepare_pa_prompt_with_decisions(iteration, results, analysis, official_scores)
+
+        codex_responses_dir = os.path.join(self.experiment_run_dir, "codex-responses")
+
+        codex_result = execute_codex(
+            mode=CodexMode.PA,
+            results_data=prompt,
+            output_dir=self.worktrees_dir,
+            iteration=iteration,
+            codex_responses_dir=codex_responses_dir,
+            timeout=self.config.get("pa_codex_timeout", 300),  # Longer timeout for decisions
+            resume_prompt=prompt if iteration > 0 else None,
+            run_label="evolution"
+        )
+
+        if not codex_result.success:
+            raise RuntimeError(f"Codex PA execution failed: {codex_result.error}")
+
+        # Read the output
+        if codex_result.output_file:
+            output_path = os.path.join(self.worktrees_dir, codex_result.output_file)
+            if os.path.exists(output_path):
+                with open(output_path, 'r') as f:
+                    return f.read()
+
+        # Try to get from JSONL
+        return codex_result.raw_output or ""
+
+    def _resume_pa_for_decisions(self, iteration: int, retry_prompt: str) -> str:
+        """
+        Resume PA session with a retry prompt to fix decision format.
+
+        Returns the new Codex output text.
+        """
+        codex_responses_dir = os.path.join(self.experiment_run_dir, "codex-responses")
+
+        codex_result = execute_codex(
+            mode=CodexMode.PA,
+            results_data=retry_prompt,
+            output_dir=self.worktrees_dir,
+            iteration=iteration,
+            codex_responses_dir=codex_responses_dir,
+            timeout=self.config.get("pa_codex_timeout", 180),
+            resume_prompt=retry_prompt,
+            run_label="decision_retry"
+        )
+
+        if not codex_result.success:
+            raise RuntimeError(f"Codex PA resume failed: {codex_result.error}")
+
+        if codex_result.output_file:
+            output_path = os.path.join(self.worktrees_dir, codex_result.output_file)
+            if os.path.exists(output_path):
+                with open(output_path, 'r') as f:
+                    return f.read()
+
+        return codex_result.raw_output or ""
+
+    def _prepare_pa_prompt_with_decisions(
+        self,
+        iteration: int,
+        results: List[ExperimentResult],
+        analysis: AnalysisResult,
+        official_scores: Optional[Dict[str, float]]
+    ) -> str:
+        """
+        Prepare PA prompt that includes evolution decision requirements.
+        """
+        # Get base prompt
+        base_prompt = self._prepare_pa_prompt(iteration, results, analysis, official_scores)
+        if not base_prompt:
+            raise RuntimeError("Failed to prepare base PA prompt")
+
+        # Load evolution decisions template
+        evolution_prompt_path = Path("prompts") / "PA" / "pa_evolution_decisions.md"
+        if evolution_prompt_path.exists():
+            evolution_template = evolution_prompt_path.read_text(encoding="utf-8")
+
+            # Build experiment list for the template
+            experiment_list = "\n".join(f"- {r.experiment_id}" for r in results)
+            evolution_template = evolution_template.replace("<<EXPERIMENT_IDS>>", experiment_list)
+
+            # Append to base prompt
+            return base_prompt + "\n\n" + evolution_template
+        else:
+            # Inline evolution decision requirements if template not found
+            experiment_list = "\n".join(f"- {r.experiment_id}" for r in results)
+            inline_requirements = f"""
+
+---
+
+## CRITICAL: Evolution Decisions Required
+
+You MUST provide explicit CONTINUE or TERMINATE decisions for each experiment.
+
+### Experiments requiring decisions:
+{experiment_list}
+
+### Output Format (REQUIRED):
+
+```yaml
+decisions:
+  - experiment_id: "<exact experiment ID from list above>"
+    decision: CONTINUE  # or TERMINATE
+    confidence: 0.85  # 0.0-1.0
+    reasoning: "Why this decision was made"
+    improvement_instructions: |  # REQUIRED for CONTINUE
+      1. First specific improvement
+      2. Second specific improvement
+    potential_ceiling: 0.82  # Optional: estimated max score
+    priority_rank: 1  # 1=highest priority
+
+summary:
+  continue_count: <number>
+  terminate_count: <number>
+  new_slots: <same as terminate_count>
+```
+
+### Decision Criteria:
+
+**CONTINUE if:**
+- Score is competitive (within 5% of best)
+- Clear improvement path exists
+- Approach provides diversity value
+
+**TERMINATE if:**
+- Score is significantly worse (>10% below best) with no clear fix
+- Approach has fundamental limitations
+- Similar/better approach already exists
+"""
+            return base_prompt + inline_requirements
+
+    def _save_evolution_decisions(self, iteration: int, decisions: List[ExperimentDecision]) -> None:
+        """Save evolution decisions to a JSON file for debugging/auditing."""
+        decisions_file = os.path.join(self.analysis_dir, f"evolution_decisions_iter_{iteration}.json")
+
+        decisions_data = {
+            "iteration": iteration,
+            "timestamp": datetime.datetime.now().isoformat(),
+            "decisions": [
+                {
+                    "experiment_id": d.experiment_id,
+                    "decision": d.decision.value,
+                    "reasoning": d.reasoning,
+                    "confidence": d.confidence,
+                    "improvement_instructions": d.improvement_instructions,
+                    "termination_reason": d.termination_reason,
+                    "potential_ceiling": d.potential_ceiling,
+                    "priority_rank": d.priority_rank
+                }
+                for d in decisions
+            ],
+            "summary": {
+                "continue_count": sum(1 for d in decisions if d.decision == ExperimentDecisionType.CONTINUE),
+                "terminate_count": sum(1 for d in decisions if d.decision == ExperimentDecisionType.TERMINATE)
+            }
+        }
+
+        with open(decisions_file, 'w') as f:
+            json.dump(decisions_data, f, indent=2)
+
+        self.logger.info(f"Evolution decisions saved to: {decisions_file}")
