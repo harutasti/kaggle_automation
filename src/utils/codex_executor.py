@@ -523,20 +523,30 @@ def execute_kse_hypothesis_generation(
     start_time = time.time()
 
     try:
-        cmd = ["codex", "exec", "--skip-git-repo-check"]
+        # Build command
+        # For resume: codex exec --skip-git-repo-check --json resume --last "prompt"
+        # For initial: codex exec --skip-git-repo-check --json
         if resume_prompt:
-            cmd.extend(["resume", "--last"])
-        cmd.append("--json")
-
-        proc = subprocess.run(
-            cmd,
-            input=stdin_input.encode("utf-8"),
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            cwd=str(output_dir),
-            timeout=timeout,
-            check=False
-        )
+            cmd = ["codex", "exec", "--skip-git-repo-check", "--json", "resume", "--last", stdin_input]
+            proc = subprocess.run(
+                cmd,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                cwd=str(output_dir),
+                timeout=timeout,
+                check=False
+            )
+        else:
+            cmd = ["codex", "exec", "--skip-git-repo-check", "--json"]
+            proc = subprocess.run(
+                cmd,
+                input=stdin_input.encode("utf-8"),
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                cwd=str(output_dir),
+                timeout=timeout,
+                check=False
+            )
 
         execution_time = time.time() - start_time
         raw_output = proc.stdout.decode("utf-8", errors="replace")
@@ -715,20 +725,31 @@ Create two output files:
             anchor_path=output_dir,
             run_label=run_label
         )
-        cmd = ["codex", "exec", "--skip-git-repo-check"]
-        if resume_prompt:
-            cmd.extend(["resume", "--last"])
-        cmd.append("--json")
 
-        proc = subprocess.run(
-            cmd,
-            input=stdin_input.encode("utf-8"),
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            cwd=str(output_dir),
-            timeout=timeout,
-            check=False
-        )
+        # Build command
+        # For resume: codex exec --skip-git-repo-check --json resume --last "prompt"
+        # For initial: codex exec --skip-git-repo-check --json
+        if resume_prompt:
+            cmd = ["codex", "exec", "--skip-git-repo-check", "--json", "resume", "--last", stdin_input]
+            proc = subprocess.run(
+                cmd,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                cwd=str(output_dir),
+                timeout=timeout,
+                check=False
+            )
+        else:
+            cmd = ["codex", "exec", "--skip-git-repo-check", "--json"]
+            proc = subprocess.run(
+                cmd,
+                input=stdin_input.encode("utf-8"),
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                cwd=str(output_dir),
+                timeout=timeout,
+                check=False
+            )
 
         execution_time = time.time() - start_time
         raw_output = proc.stdout.decode("utf-8", errors="replace")

@@ -319,7 +319,8 @@ class PerformanceAnalyzer(BaseComponent):
         self,
         iteration: int,
         results: List[ExperimentResult],
-        official_scores: Optional[Dict[str, float]] = None
+        official_scores: Optional[Dict[str, float]] = None,
+        experiment_ids: Optional[List[str]] = None
     ) -> AnalysisResult:
         """
         Analyze results AND generate evolution decisions for each experiment.
@@ -333,6 +334,8 @@ class PerformanceAnalyzer(BaseComponent):
             iteration: Current iteration number
             results: List of experiment results
             official_scores: Optional dict mapping experiment_id to official Kaggle score
+            experiment_ids: Optional list of experiment IDs that need decisions.
+                           If not provided, derived from results.
 
         Returns:
             AnalysisResult with experiment_decisions populated
@@ -347,7 +350,9 @@ class PerformanceAnalyzer(BaseComponent):
 
         # Get evolution decisions with retry logic
         try:
-            experiment_ids = [r.experiment_id for r in results]
+            # Use provided experiment_ids or derive from results
+            if experiment_ids is None:
+                experiment_ids = [r.experiment_id for r in results]
             decisions = self._get_evolution_decisions_with_retry(
                 iteration, results, analysis, official_scores, experiment_ids
             )

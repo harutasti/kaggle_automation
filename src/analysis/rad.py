@@ -66,6 +66,9 @@ class ResultAggregatorDatabase(BaseComponent):
 
         Tries common patterns emitted by WAAs:
         - result_data["score"]
+        - result_data["cv_mean_accuracy"] (LightGBM outputs)
+        - result_data["study_best_value"] (Optuna outputs)
+        - result_data["best_metrics"]["accuracy_mean"] (Optuna with metrics)
         - result_data["cv"]["mean_accuracy"]
         - result_data["cv_results"]["cv_metrics"][lightgbm_accuracy_mean|blend_accuracy|stack_accuracy]
         - result_data["base_cv_accuracy_mean"] (pseudo-label pipelines)
@@ -77,7 +80,19 @@ class ResultAggregatorDatabase(BaseComponent):
         if "score" in result_data:
             return result_data.get("score")
 
-        # CV mean accuracy
+        # Common top-level patterns
+        if "cv_mean_accuracy" in result_data:
+            return result_data.get("cv_mean_accuracy")
+
+        if "study_best_value" in result_data:
+            return result_data.get("study_best_value")
+
+        # Best metrics (Optuna with detailed metrics)
+        best_metrics = result_data.get("best_metrics") or {}
+        if "accuracy_mean" in best_metrics:
+            return best_metrics.get("accuracy_mean")
+
+        # CV mean accuracy (nested)
         cv = result_data.get("cv") or {}
         if "mean_accuracy" in cv:
             return cv.get("mean_accuracy")
