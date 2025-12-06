@@ -7,7 +7,7 @@ from pathlib import Path
 from ..core.base_component import BaseComponent
 from ..data_models import ExperimentResult, AnalysisResult, ExperimentDecision, ExperimentDecisionType
 from ..utils.file_utils import write_markdown, ensure_dir
-from ..utils.codex_executor import CodexMode, execute_codex
+from ..utils.codex_executor import CodexMode, execute_codex, extract_text_from_jsonl
 from ..utils.pa_parser import (
     parse_pa_codex_output, extract_best_score_info, extract_improvement_trend,
     parse_evolution_decisions, validate_evolution_decisions, generate_decision_retry_prompt
@@ -479,8 +479,8 @@ class PerformanceAnalyzer(BaseComponent):
                 with open(output_path, 'r') as f:
                     return f.read()
 
-        # Try to get from JSONL
-        return codex_result.raw_output or ""
+        # Extract text from JSONL output (--json mode returns JSONL events)
+        return extract_text_from_jsonl(codex_result.raw_output or "")
 
     def _resume_pa_for_decisions(self, iteration: int, retry_prompt: str) -> str:
         """
@@ -510,7 +510,8 @@ class PerformanceAnalyzer(BaseComponent):
                 with open(output_path, 'r') as f:
                     return f.read()
 
-        return codex_result.raw_output or ""
+        # Extract text from JSONL output (--json mode returns JSONL events)
+        return extract_text_from_jsonl(codex_result.raw_output or "")
 
     def _prepare_pa_prompt_with_decisions(
         self,

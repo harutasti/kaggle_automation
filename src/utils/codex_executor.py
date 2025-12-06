@@ -922,6 +922,43 @@ def execute_codex(
         )
 
 
+def extract_text_from_jsonl(jsonl_output: str) -> str:
+    """
+    Extract agent message text from Codex JSONL output.
+
+    When using --json mode, Codex outputs JSONL events to stdout.
+    This function parses those events and extracts the text content
+    from agent_message items.
+
+    Args:
+        jsonl_output: Raw JSONL string from Codex --json mode
+
+    Returns:
+        Concatenated text from all agent_message items
+    """
+    if not jsonl_output:
+        return ""
+
+    messages = []
+    for line in jsonl_output.strip().split('\n'):
+        if not line.strip():
+            continue
+        try:
+            event = json.loads(line)
+            # Look for completed agent messages
+            if event.get("type") == "item.completed":
+                item = event.get("item", {})
+                if item.get("type") == "agent_message":
+                    text = item.get("text", "")
+                    if text:
+                        messages.append(text)
+        except json.JSONDecodeError:
+            # Skip malformed lines
+            continue
+
+    return "\n\n".join(messages)
+
+
 def _parse_iteration_from_experiment_id(experiment_id: str) -> Optional[int]:
     """Extract iteration number from experiment_id like iter2_exp3_xxxx."""
     match = re.match(r"iter(\d+)_exp", experiment_id)
