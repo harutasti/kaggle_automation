@@ -110,3 +110,16 @@ WAA is authorized to:
 - Required artifacts (result JSON, submission CSV, DONE marker) and any model files: {{REQUIRED_ARTIFACTS}}
 - File path or naming nuances unique to this experiment: {{FILE_NAMING_NOTES}}
 - Quick fallback/timeout plan if resources are constrained: {{TIMEOUT_FALLBACK}}
+
+### Result JSON Requirements (CRITICAL)
+Your `result_{{EXPERIMENT_ID}}.json` MUST include a top-level `"score"` field:
+```json
+{
+  "score": <primary_validation_metric>,  // REQUIRED - This is what the system uses
+  "cv_mean_accuracy": <same_value>,       // Optional: framework-specific field
+  "cv_std_accuracy": <std>,
+  "best_params": {...},
+  "runtime_seconds": <seconds>
+}
+```
+**The system requires the `"score"` field to track experiment performance.**

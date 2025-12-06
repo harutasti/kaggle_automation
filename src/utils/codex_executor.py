@@ -331,9 +331,20 @@ def _parse_experiment_results(
         with open(result_file, 'r', encoding='utf-8') as f:
             result_data = json.load(f)
 
-        # Validate required fields
-        if "score" not in result_data:
-            logger.error("Result file missing 'score' field")
+        # Extract score using flexible field names (mirrors RAD's logic)
+        score = _extract_score_from_result(result_data)
+
+        if score is None:
+            logger.warning("Could not extract score using known field names, checking for any numeric metric...")
+            # Last resort: look for any float value that might be a score (0-1 range)
+            for key, value in result_data.items():
+                if isinstance(value, (int, float)) and 0 <= value <= 1:
+                    score = float(value)
+                    logger.info(f"Using '{key}' as score: {score}")
+                    break
+
+        if score is None:
+            logger.error("Result file missing score (tried: score, cv_mean_accuracy, study_best_value, etc.)")
             return CodexResult(
                 success=False,
                 mode=CodexMode.WAA,
@@ -342,11 +353,13 @@ def _parse_experiment_results(
                 raw_output=raw_output,
                 output_file=output_file,
                 result_data=result_data,
-                error="Result file missing required 'score' field",
-                error_type="INVALID_RESULT"
+                error="Could not extract score from result file",
+                error_type="MISSING_SCORE"
             )
 
-        logger.info(f"Successfully parsed results. Score: {result_data.get('score')}")
+        # Store extracted score back into result_data for consistency
+        result_data["score"] = score
+        logger.info(f"Successfully parsed results. Score: {score}")
 
         # Check for submission file (optional but good to note)
         if not submission_file.exists():
@@ -387,6 +400,60 @@ def _parse_experiment_results(
             error=f"Unexpected error parsing results: {e}",
             error_type="PARSE_ERROR"
         )
+
+
+def _extract_score_from_result(result_data: dict) -> Optional[float]:
+    """
+    Extract score from result JSON using flexible field names.
+
+    Mirrors RAD's _extract_score() logic for consistency across the system.
+
+    Tries common patterns emitted by WAAs:
+    - result_data["score"]
+    - result_data["cv_mean_accuracy"] (LightGBM outputs)
+    - result_data["study_best_value"] (Optuna outputs)
+    - result_data["best_metrics"]["accuracy_mean"] (Optuna with metrics)
+    - result_data["cv"]["mean_accuracy"]
+    - result_data["cv_results"]["cv_metrics"][accuracy_mean|...]
+    - result_data["base_cv_accuracy_mean"] (pseudo-label pipelines)
+    """
+    if not result_data:
+        return None
+
+    # Direct score field
+    if "score" in result_data:
+        return result_data.get("score")
+
+    # LightGBM outputs
+    if "cv_mean_accuracy" in result_data:
+        return result_data.get("cv_mean_accuracy")
+
+    # Optuna outputs
+    if "study_best_value" in result_data:
+        return result_data.get("study_best_value")
+
+    # Optuna with detailed metrics
+    best_metrics = result_data.get("best_metrics") or {}
+    if "accuracy_mean" in best_metrics:
+        return best_metrics.get("accuracy_mean")
+
+    # Nested CV structure
+    cv = result_data.get("cv") or {}
+    if "mean_accuracy" in cv:
+        return cv.get("mean_accuracy")
+
+    # Ensemble/stacks
+    cv_results = result_data.get("cv_results") or {}
+    cv_metrics = cv_results.get("cv_metrics") or {}
+    for key in ("accuracy_mean", "lightgbm_accuracy_mean", "blend_accuracy", "stack_accuracy"):
+        if key in cv_metrics:
+            return cv_metrics.get(key)
+
+    # Pseudo-label pipeline
+    if "base_cv_accuracy_mean" in result_data:
+        return result_data.get("base_cv_accuracy_mean")
+
+    return None
 
 
 def execute_with_retry(
@@ -1002,11 +1069,11 @@ def execute_codex_resume(
     logger.info(f"Resuming Codex session for {experiment_id} in {worktree_path}")
 
     try:
-        # Use codex resume --last to continue the previous session
-        # The resume_prompt is passed via stdin to provide context
+        # Use codex exec with resume --last to continue the previous session
+        # The resume_prompt is passed as a command argument (not stdin)
+        # Correct format: codex exec --skip-git-repo-check --json resume --last "prompt"
         proc = subprocess.run(
-            ["codex", "resume", "--last", "--json"],
-            input=resume_prompt.encode("utf-8"),
+            ["codex", "exec", "--skip-git-repo-check", "--json", "resume", "--last", resume_prompt],
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
             cwd=str(worktree_path),
