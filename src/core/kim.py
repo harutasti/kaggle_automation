@@ -86,6 +86,91 @@ class KaggleInterfaceManager(BaseComponent):
             self.logger.error(f"Error running crawler: {e}")
             return False
 
+    def _parse_deadline(self, raw_deadline: Any) -> Optional[datetime.datetime]:
+        """Convert Kaggle API deadline field into a datetime object when possible."""
+        if isinstance(raw_deadline, datetime.datetime):
+            return raw_deadline
+
+        if isinstance(raw_deadline, str):
+            for fmt in [
+                "%Y-%m-%d %H:%M:%S",
+                "%m/%d/%Y %H:%M:%S %p",
+                "%Y-%m-%dT%H:%M:%S",
+                "%Y-%m-%dT%H:%M:%S.%fZ",
+            ]:
+                try:
+                    return datetime.datetime.strptime(raw_deadline, fmt)
+                except ValueError:
+                    continue
+        return None
+
+    def _get_competition_metadata_from_api(self) -> CompetitionInfo:
+        """Fetch competition metadata using supported Kaggle API endpoints."""
+        if self.api is None:
+            raise RuntimeError("Kaggle API is unavailable; cannot fetch competition info.")
+
+        try:
+            competitions = self.api.competitions_list(search=self.competition_name)
+        except Exception as api_err:
+            raise RuntimeError(f"Failed to fetch competition list: {api_err}") from api_err
+
+        target_competition = None
+        if competitions:
+            for comp in competitions:
+                comp_ref = getattr(comp, "ref", "")
+                # Handle case where ref is a full URL
+                if comp_ref.startswith("http"):
+                    comp_ref = comp_ref.rstrip("/").split("/")[-1]
+                if comp_ref.lower() == self.competition_name.lower():
+                    target_competition = comp
+                    break
+            if target_competition is None:
+                target_competition = competitions[0]
+                first_ref = getattr(target_competition, 'ref', 'unknown')
+                if first_ref.startswith("http"):
+                    first_ref = first_ref.rstrip("/").split("/")[-1]
+                self.logger.warning(
+                    f"Exact match for competition '{self.competition_name}' not found; "
+                    f"using search result '{first_ref}'."
+                )
+
+        if target_competition is None:
+            raise RuntimeError(f"Competition '{self.competition_name}' not found via Kaggle API.")
+
+        competition_ref = getattr(target_competition, "ref", self.competition_name)
+        # Handle case where ref is a full URL instead of just the slug
+        if competition_ref and competition_ref.startswith("http"):
+            # Extract slug from URL like https://www.kaggle.com/competitions/house-prices-...
+            competition_ref = competition_ref.rstrip("/").split("/")[-1]
+        deadline = self._parse_deadline(getattr(target_competition, "deadline", None))
+        evaluation_metric = getattr(target_competition, "evaluationMetric", None) or "Unknown"
+
+        try:
+            file_list = self.api.competition_list_files(competition_ref)
+            # Handle both FileList object (has .files attribute) and direct list
+            files = getattr(file_list, 'files', file_list) or []
+            data_files = [f.name for f in files]
+        except Exception as file_error:
+            self.logger.error(f"Failed to get file list for competition '{competition_ref}': {file_error}")
+            raise RuntimeError(f"Failed to fetch competition file list from Kaggle API: {file_error}") from file_error
+
+        description = getattr(target_competition, "description", None)
+        if not description:
+            description = (
+                f"# Competition: {getattr(target_competition, 'title', competition_ref)}\n\n"
+                f"No description was returned by the Kaggle API. "
+                f"Visit https://www.kaggle.com/competitions/{competition_ref} for details."
+            )
+
+        return CompetitionInfo(
+            name=getattr(target_competition, "title", competition_ref),
+            evaluation_metric=evaluation_metric,
+            deadline=deadline,
+            description_markdown=description,
+            data_files=data_files,
+            competition_type=getattr(target_competition, "category", None),
+        )
+
     def get_competition_info(self) -> Optional[CompetitionInfo]:
         """Retrieve competition information."""
         method_name = "get_competition_info"
@@ -93,17 +178,22 @@ class KaggleInterfaceManager(BaseComponent):
         try:
             # First, try to use crawler data if enabled
             if self.use_crawler and not self.simulation_mode:
-                # Check if crawler data exists
+                # Check if crawler data exists and is complete (has overview file)
                 competition_path = os.path.join(self.crawler_output_dir, self.competition_name)
-                if not os.path.exists(competition_path):
-                    self.logger.info("Crawler data not found, running crawler...")
-                    if self._run_crawler():
-                        # Try to parse after crawling
-                        info = parse_competition_info(self.competition_name, self.crawler_output_dir)
-                        if info:
-                            self.logger.info(f"Successfully parsed competition info from crawler data: {info.name}")
-                            self._log_end(method_name, info)
-                            return info
+                overview_file = os.path.join(competition_path, "pages", f"{self.competition_name}_overview.md")
+
+                if not os.path.exists(overview_file):
+                    self.logger.info("Crawler data not found or incomplete, running crawler...")
+                    if not self._run_crawler(force=True):
+                        raise RuntimeError("Crawler failed to fetch competition data. Check logs for details.")
+                    # Try to parse after crawling
+                    info = parse_competition_info(self.competition_name, self.crawler_output_dir)
+                    if info:
+                        self.logger.info(f"Successfully parsed competition info from crawler data: {info.name}")
+                        self._log_end(method_name, info)
+                        return info
+                    else:
+                        raise RuntimeError("Failed to parse crawler data after successful crawl.")
                 else:
                     # Parse existing crawler data
                     info = parse_competition_info(self.competition_name, self.crawler_output_dir)
@@ -128,34 +218,7 @@ class KaggleInterfaceManager(BaseComponent):
                 self.logger.info(f"Generated dummy competition info for: {self.competition_name}")
             else:
                 # Fetch info from real Kaggle API (api is guaranteed non-None here)
-                comp = self.api.competition_view(self.competition_name)
-                
-                # Parse deadline with flexible formats
-                deadline = None
-                if hasattr(comp, 'deadline'):
-                    try:
-                        deadline = datetime.datetime.strptime(comp.deadline, '%Y-%m-%d %H:%M:%S')
-                    except ValueError:
-                        try:
-                            deadline = datetime.datetime.strptime(comp.deadline, '%m/%d/%Y %H:%M:%S %p')
-                        except ValueError:
-                            self.logger.warning(f"Could not parse deadline: {comp.deadline}")
-                
-                # Get available file list
-                try:
-                    files = self.api.competition_list_files(self.competition_name)
-                    data_files = [f.name for f in files]
-                except Exception as file_error:
-                    self.logger.warning(f"Could not get file list: {file_error}")
-                    data_files = []
-                
-                info = CompetitionInfo(
-                    name=comp.title,
-                    evaluation_metric=comp.evaluationMetric if hasattr(comp, 'evaluationMetric') else "Unknown",
-                    deadline=deadline,
-                    description_markdown=comp.description,
-                    data_files=data_files
-                )
+                info = self._get_competition_metadata_from_api()
                 self.logger.info(f"Successfully retrieved info for competition: {info.name}")
 
             self._log_end(method_name, info)
