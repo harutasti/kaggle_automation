@@ -114,12 +114,12 @@ WAA is authorized to:
 ### Result JSON Requirements (CRITICAL)
 Your `result_{{EXPERIMENT_ID}}.json` MUST include a top-level `"score"` field:
 ```json
-{
-  "score": <primary_validation_metric>,  // REQUIRED - This is what the system uses
-  "cv_mean_accuracy": <same_value>,       // Optional: framework-specific field
+{{
+  "score": <primary_validation_metric>,
+  "cv_mean_accuracy": <same_value>,
   "cv_std_accuracy": <std>,
-  "best_params": {...},
+  "best_params": {{...}},
   "runtime_seconds": <seconds>
-}
+}}
 ```
 **The system requires the `"score"` field to track experiment performance.**

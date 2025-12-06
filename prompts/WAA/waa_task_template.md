@@ -250,18 +250,18 @@ Recommended libraries to consider:
 
 1. **`result_{exp_id}.json`**: MUST contain a top-level `"score"` field:
    ```json
-   {
-     "score": 0.8462,           // REQUIRED: Primary validation metric (CV mean)
-     "cv_mean_accuracy": 0.8462, // Optional: Can include original metric name too
+   {{
+     "score": 0.8462,
+     "cv_mean_accuracy": 0.8462,
      "cv_std_accuracy": 0.005,
      "cv_fold_scores": [0.84, 0.85, 0.84, 0.85, 0.84],
-     "best_params": {...},
+     "best_params": {{...}},
      "runtime_seconds": 120,
      "feature_importance_top10": [...]
-   }
+   }}
    ```
 
-   **IMPORTANT**: Always include `"score"` as the primary metric field, even if you also include framework-specific fields like `cv_mean_accuracy` or `study_best_value`. The system requires this field to track experiment performance.
+   **IMPORTANT**: Always include `"score"` as the primary metric field. The system requires this field to track experiment performance.
 
 2. **`submission_{exp_id}.csv`**: Predictions in required format
 

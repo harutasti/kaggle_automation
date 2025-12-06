@@ -1,0 +1,22 @@
+{
+  "kaggle_competition_name": "house-prices-advanced-regression-techniques",
+  "max_iterations": 5,
+  "wca_per_iteration": 3,
+  "stop_condition": {
+    "no_improvement_iterations": 2
+  },
+  "experiments_base_dir": "./experiments",
+  "log_file": "./logs/auto_kaggle.log",
+  "log_level": "INFO",
+  "simulation_mode": false,
+  "use_crawler": true,
+  "max_discussions": 20,
+  "analyze_dataset": true,
+  "prompts_dir": "prompts",
+  "experiment_pyproject_path": "config/experiment_pyproject.toml",
+  "kse_codex_timeout": 3600,
+  "pa_codex_timeout": 3600,
+  "waa_resume_timeout": 3600,
+  "training_idle_threshold_minutes": 3,
+  "resource_monitor_interval_seconds": 30
+}
