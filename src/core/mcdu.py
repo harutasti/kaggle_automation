@@ -223,7 +223,7 @@ class MasterControllerDecisionUnit(BaseComponent):
                     break
 
                 continuations, hypotheses = self._generate_evolution_hypotheses_for_iteration(
-                    continue_decisions, terminate_decisions, prior_results, prior_official_scores
+                    last_analysis, prior_results, prior_official_scores
                 )
 
                 if not continuations and not hypotheses:
@@ -385,10 +385,16 @@ class MasterControllerDecisionUnit(BaseComponent):
             self.logger.info(self.stop_reason)
             return True
 
-        if self.score_threshold and self.best_score_overall and self.best_score_overall >= self.score_threshold:
-            self.stop_reason = f"Achieved score threshold ({self.score_threshold}) with score {self.best_score_overall:.4f}"
-            self.logger.info(self.stop_reason)
-            return True
+        if self.score_threshold and self.best_score_overall:
+            # Check threshold based on metric direction
+            threshold_met = (
+                self.best_score_overall >= self.score_threshold if self.pa.higher_is_better
+                else self.best_score_overall <= self.score_threshold
+            )
+            if threshold_met:
+                self.stop_reason = f"Achieved score threshold ({self.score_threshold}) with score {self.best_score_overall:.4f}"
+                self.logger.info(self.stop_reason)
+                return True
 
         if self.iterations_without_improvement >= self.no_improvement_threshold:
              self.stop_reason = f"No improvement in best score for {self.no_improvement_threshold} iterations."
@@ -431,13 +437,22 @@ class MasterControllerDecisionUnit(BaseComponent):
         initial_best_score = self.best_score_overall
 
         if current_best_iter_score is not None:
-            if self.best_score_overall is None or current_best_iter_score > self.best_score_overall:
+            # Check if score improved based on metric direction
+            is_improvement = False
+            if self.best_score_overall is None:
+                is_improvement = True
+            elif self.pa.higher_is_better:
+                is_improvement = current_best_iter_score > self.best_score_overall
+            else:
+                is_improvement = current_best_iter_score < self.best_score_overall
+
+            if is_improvement:
                 self.best_score_overall = current_best_iter_score
                 self.best_experiment_id_overall = analysis_result.best_experiment_id
                 self.iterations_without_improvement = 0  # Reset because improved
                 self.logger.info(f"New overall best score: {self.best_score_overall:.4f} (Exp ID: {self.best_experiment_id_overall})")
             else:
-                 # Score stayed the same or decreased
+                 # Score stayed the same or got worse
                  if initial_best_score is not None:  # Not the first iteration
                      self.iterations_without_improvement += 1
                      self.logger.info(f"Best score did not improve. Iterations without improvement: {self.iterations_without_improvement}")
@@ -548,8 +563,7 @@ class MasterControllerDecisionUnit(BaseComponent):
 
     def _generate_evolution_hypotheses_for_iteration(
         self,
-        continue_decisions: List[ExperimentDecision],
-        terminate_decisions: List[ExperimentDecision],
+        analysis_result: AnalysisResult,
         iteration_results: List[ExperimentResult],
         official_scores: Dict[str, float]
     ) -> tuple:
@@ -561,12 +575,12 @@ class MasterControllerDecisionUnit(BaseComponent):
         """
         # Use KSE's evolution hypothesis generation
         continuations, new_hypotheses = self.kse.generate_evolution_hypotheses(
-            iteration=self.current_iteration,
-            continue_decisions=continue_decisions,
-            terminate_decisions=terminate_decisions,
             competition_info=self.competition_info,
+            current_iteration=self.current_iteration,
+            num_hypotheses=self.wca_per_iteration,
+            analysis_result=analysis_result,
+            previous_results=iteration_results,
             persistent_experiments=self.persistent_experiments,
-            iteration_results=iteration_results,
             official_scores=official_scores
         )
 

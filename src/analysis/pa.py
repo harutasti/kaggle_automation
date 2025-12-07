@@ -6,7 +6,7 @@ from pathlib import Path
 
 from ..core.base_component import BaseComponent
 from ..data_models import ExperimentResult, AnalysisResult, ExperimentDecision, ExperimentDecisionType
-from ..utils.file_utils import write_markdown, ensure_dir
+from ..utils.file_utils import write_markdown, ensure_dir, is_higher_better_from_leaderboard
 from ..utils.codex_executor import CodexMode, execute_codex, extract_text_from_jsonl
 from ..utils.pa_parser import (
     parse_pa_codex_output, extract_best_score_info, extract_improvement_trend,
@@ -31,6 +31,11 @@ class PerformanceAnalyzer(BaseComponent):
         self.prompt_filler = PromptFiller(config)
         self.competition_name = config.get("kaggle_competition_name", "unknown")
         self.evaluation_metric = config.get("evaluation_metric", "unknown")
+
+        # Determine metric direction (higher is better or lower is better)
+        self.higher_is_better = is_higher_better_from_leaderboard(
+            self.competition_name, self.evaluation_metric
+        )
 
     def analyze_results(self, iteration: int, results: List[ExperimentResult],
                        official_scores: Optional[Dict[str, float]] = None) -> AnalysisResult:
@@ -61,12 +66,43 @@ class PerformanceAnalyzer(BaseComponent):
         best_exp_id_current_iter = None
         scores = []
         if successful_results:
-            successful_results.sort(key=lambda r: r.score, reverse=True)  # Sort by score (desc)
-            best_exp_current_iter = successful_results[0]
-            best_score_current_iter = best_exp_current_iter.score
-            best_exp_id_current_iter = best_exp_current_iter.experiment_id
-            scores = [r.score for r in successful_results]
-            self.logger.info(f"Best score in iteration {iteration}: {best_score_current_iter:.4f} (Exp ID: {best_exp_id_current_iter})")
+            # Use official scores if available, otherwise fall back to CV scores
+            if official_scores:
+                # Filter to experiments that have official scores
+                results_with_official = [
+                    r for r in successful_results
+                    if r.experiment_id in official_scores
+                ]
+                if results_with_official:
+                    # Sort by official score based on metric direction
+                    results_with_official.sort(
+                        key=lambda r: official_scores[r.experiment_id],
+                        reverse=self.higher_is_better
+                    )
+                    best_exp_current_iter = results_with_official[0]
+                    best_score_current_iter = official_scores[best_exp_current_iter.experiment_id]
+                    best_exp_id_current_iter = best_exp_current_iter.experiment_id
+                    scores = [official_scores[r.experiment_id] for r in results_with_official]
+                    direction = "higher is better" if self.higher_is_better else "lower is better"
+                    self.logger.info(
+                        f"Best official score in iteration {iteration}: {best_score_current_iter:.4f} "
+                        f"(Exp ID: {best_exp_id_current_iter}, {direction})"
+                    )
+                else:
+                    self.logger.warning("No official scores available for successful experiments")
+
+            # Fall back to CV scores if no official scores
+            if best_score_current_iter is None:
+                successful_results.sort(key=lambda r: r.score, reverse=self.higher_is_better)
+                best_exp_current_iter = successful_results[0]
+                best_score_current_iter = best_exp_current_iter.score
+                best_exp_id_current_iter = best_exp_current_iter.experiment_id
+                scores = [r.score for r in successful_results]
+                direction = "higher is better" if self.higher_is_better else "lower is better"
+                self.logger.info(
+                    f"Best CV score in iteration {iteration}: {best_score_current_iter:.4f} "
+                    f"(Exp ID: {best_exp_id_current_iter}, {direction})"
+                )
 
         # Improvement trend (placeholder: would need full history from RAD)
         # all_results = rad.get_all_results()  # RAD instance required
@@ -87,10 +123,11 @@ class PerformanceAnalyzer(BaseComponent):
         summary_md += f"- Failed Runs: {len(failed_results)}\n\n"
 
         if best_score_current_iter is not None:
+            score_type = "Official" if official_scores and best_exp_id_current_iter in official_scores else "CV"
             summary_md += f"## Performance\n"
-            summary_md += f"- **Best Score:** {best_score_current_iter:.4f}\n"
+            summary_md += f"- **Best {score_type} Score:** {best_score_current_iter:.4f}\n"
             summary_md += f"- Best Experiment ID: {best_exp_id_current_iter}\n"
-            summary_md += f"- Score Distribution (Successful Runs): Avg={sum(scores)/len(scores):.4f}, Min={min(scores):.4f}, Max={max(scores):.4f}\n"
+            summary_md += f"- {score_type} Score Distribution: Avg={sum(scores)/len(scores):.4f}, Min={min(scores):.4f}, Max={max(scores):.4f}\n"
             summary_md += f"- Improvement Trend: {improvement_trend}\n\n" # TODO
         else:
             summary_md += "## Performance\nNo successful runs with scores in this iteration.\n\n"
