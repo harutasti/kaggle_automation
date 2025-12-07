@@ -610,9 +610,12 @@ class MasterControllerDecisionUnit(BaseComponent):
         all_launched = []
         all_failed = []
 
+        # Total WAAs being launched (for GPU allocation)
+        total_waas = len(continuations) + len(new_hypotheses)
+
         # Launch continuations first (resume existing worktrees)
         if continuations:
-            cont_result = self.eo.launch_continuation_experiments(continuations)
+            cont_result = self.eo.launch_continuation_experiments(continuations, total_waas)
             all_launched.extend(cont_result.get('launched', []))
             all_failed.extend(cont_result.get('failed', []))
 
