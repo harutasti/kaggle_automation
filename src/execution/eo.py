@@ -30,6 +30,8 @@ class ExperimentOrchestrator(BaseComponent):
 
         self.repo = self._get_git_repo()
         self.active_processes: Dict[str, Tuple[subprocess.Popen, str]] = {} # {exp_id: (process, worktree_path)}
+        # Track worktree locations for both fresh experiments and continuations
+        self.experiment_worktree_map: Dict[str, str] = {}
 
         # Execution mode derives from simulation_mode
         self.codex_launcher = None
@@ -182,6 +184,9 @@ class ExperimentOrchestrator(BaseComponent):
                      start_point = self.repo.head.commit
                      self.repo.git.worktree('add', '-b', branch_name, worktree_path, start_point)
                      self.logger.info(f"Created Git worktree at: {worktree_path} on branch {branch_name}")
+
+                # Track worktree for later result collection
+                self.experiment_worktree_map[exp_id] = worktree_path
 
                 # Copy kaggle_data to worktree for WAA access
                 kaggle_data_src = os.path.join(self.experiment_run_dir, "kaggle_data")
@@ -759,6 +764,10 @@ Please execute the experiment exactly as described above. Ensure you:
                 self.session_manager.create_status_file(worktree_path, cont_id)
                 self.logger.info(f"Reset status file for continuation: {cont_id}")
 
+                # Track worktree mapping for continuation ID and original experiment
+                self.experiment_worktree_map[cont_id] = worktree_path
+                self.experiment_worktree_map[exp_id] = worktree_path
+
                 # Save continuation metadata
                 metadata = {
                     "continuation_id": cont_id,
@@ -942,6 +951,11 @@ Please execute the continuation experiment exactly as described above. Ensure yo
         self._log_start(method_name, exp_id=exp_id, path=worktree_path)
 
         try:
+            # Ensure source exists before touching git metadata
+            if not os.path.exists(worktree_path):
+                self.logger.warning(f"Worktree path does not exist: {worktree_path}")
+                return None
+
             # Create archive directory
             archive_base = os.path.join(self.experiment_run_dir, "archived_experiments")
             ensure_dir(archive_base)
@@ -960,14 +974,16 @@ Please execute the continuation experiment exactly as described above. Ensure yo
                 "archive_path": archive_path
             }
 
-            # First, remove git worktree association (but keep files)
-            try:
-                self.repo.git.worktree('remove', '--force', worktree_path)
-                self.logger.info(f"Removed git worktree association for {exp_id}")
-            except git.GitCommandError as e:
-                self.logger.warning(f"Could not remove worktree association: {e}")
+            # Move worktree to archive before running git cleanup to avoid deleting contents
+            shutil.move(worktree_path, archive_path)
+            self.logger.info(f"Moved worktree to archive: {archive_path}")
 
-            # Prune worktree metadata
+            # Save archive metadata
+            metadata_path = os.path.join(archive_path, "archive_metadata.json")
+            with open(metadata_path, 'w') as f:
+                json.dump(metadata, f, indent=2)
+
+            # Clean git metadata after the move; prune will drop stale entries
             try:
                 self.repo.git.worktree('prune')
             except git.GitCommandError:
@@ -981,21 +997,8 @@ Please execute the continuation experiment exactly as described above. Ensure yo
             except git.GitCommandError as e:
                 self.logger.warning(f"Could not delete branch: {e}")
 
-            # Move worktree to archive
-            if os.path.exists(worktree_path):
-                shutil.move(worktree_path, archive_path)
-                self.logger.info(f"Moved worktree to archive: {archive_path}")
-
-                # Save archive metadata
-                metadata_path = os.path.join(archive_path, "archive_metadata.json")
-                with open(metadata_path, 'w') as f:
-                    json.dump(metadata, f, indent=2)
-
-                self._log_end(method_name, result=archive_path)
-                return archive_path
-            else:
-                self.logger.warning(f"Worktree path does not exist: {worktree_path}")
-                return None
+            self._log_end(method_name, result=archive_path)
+            return archive_path
 
         except Exception as e:
             self._log_error(method_name, e)
@@ -1037,9 +1040,31 @@ Please execute the continuation experiment exactly as described above. Ensure yo
 
     def get_worktree_path(self, exp_id: str) -> Optional[str]:
         """Return the worktree path for a given experiment ID."""
+        # Prefer active process mapping
         if exp_id in self.active_processes:
             return self.active_processes[exp_id][1]
-        # Completed experiments drop from active_processes; reconstruct path
+
+        # Use stored worktree map if available
+        mapped_path = self.experiment_worktree_map.get(exp_id)
+        if mapped_path and os.path.exists(mapped_path):
+            return mapped_path
+
+        # Fallback: scan known worktrees for continuation markers
+        try:
+            for entry in os.listdir(self.worktree_base_dir):
+                candidate = os.path.join(self.worktree_base_dir, entry)
+                if not os.path.isdir(candidate):
+                    continue
+                continuation_marker = os.path.join(candidate, f"continuation_{exp_id}.json")
+                done_marker = os.path.join(candidate, f"DONE_{exp_id}")
+                if os.path.exists(continuation_marker) or os.path.exists(done_marker):
+                    # Cache for future lookups
+                    self.experiment_worktree_map[exp_id] = candidate
+                    return candidate
+        except FileNotFoundError:
+            pass
+
+        # Completed experiments drop from active_processes; reconstruct path (may be wrong for continuations)
         path = os.path.join(self.worktree_base_dir, exp_id)
         # Caller can check existence as needed
         return path

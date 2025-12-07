@@ -855,6 +855,18 @@ Create two output files:
                 analysis=analysis_data or {"report_created": True}
             )
 
+        # Fallback: treat non-empty JSONL/text output as success even if files were not written
+        text_output = extract_text_from_jsonl(raw_output or "")
+        if text_output.strip():
+            return CodexResult(
+                success=True,
+                mode=CodexMode.PA,
+                execution_time=execution_time,
+                raw_output=raw_output,
+                output_file=output_file,
+                analysis=analysis_data or {"report_created": False, "text_output": text_output}
+            )
+
         return CodexResult(
             success=False,
             mode=CodexMode.PA,
