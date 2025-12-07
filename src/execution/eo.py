@@ -808,40 +808,94 @@ Please execute the experiment exactly as described above. Ensure you:
         total_waas: int
     ) -> Optional[subprocess.Popen]:
         """Launch Codex for a continuation experiment with resume context."""
-        if not self.codex_launcher:
-            self.logger.error("Codex launcher not initialized")
-            return None
-
         cont_id = continuation.continuation_id
 
-        # Build continuation context for Codex
-        context = f"""This is a CONTINUATION experiment building on {continuation.experiment_id}.
+        try:
+            # Read continuation task markdown
+            with open(task_path, 'r', encoding='utf-8') as f:
+                task_content = f.read()
 
-Parent experiment achieved score: {continuation.parent_score:.4f}
+            # Get GPU allocation
+            waa_index = GPUAllocator.parse_waa_index(cont_id)
+            gpu_allocation = self.gpu_allocator.allocate(waa_index, total_waas)
 
-PA's improvement instructions:
-{continuation.improvement_instructions}
+            # Prepare environment with GPU settings
+            env = os.environ.copy()
+            env.update(gpu_allocation.env_vars)
 
-Your task: Implement these improvements in the existing codebase.
-DO NOT start from scratch - build on what exists.
+            # Prepare hardware allocation info
+            hardware_info = ""
+            if gpu_allocation:
+                cuda_devices = gpu_allocation.cuda_visible_devices or "N/A (CPU only)"
+                hardware_info = f"""
+**HARDWARE ALLOCATION**:
+- GPUs assigned: {cuda_devices}
+- Memory fraction: {gpu_allocation.memory_fraction:.2f}
+- GPU count: {gpu_allocation.gpu_count}
 
-Output files should use the continuation ID: {cont_id}
+Please ensure your code respects these GPU constraints. The environment variables are already set:
+- CUDA_VISIBLE_DEVICES={cuda_devices}
+- TF_FORCE_GPU_ALLOW_GROWTH=true
+- If no GPU is assigned, use CPU only.
+
 """
 
-        # Get GPU allocation
-        waa_index = GPUAllocator.parse_waa_index(cont_id)
-        allocation = self.gpu_allocator.allocate(waa_index, total_waas)
+            # Build continuation context
+            continuation_context = f"""
+**CONTINUATION EXPERIMENT**
+This is a CONTINUATION experiment building on {continuation.experiment_id}.
+Parent experiment achieved score: {continuation.parent_score:.4f}
 
-        try:
-            # Launch Codex with the task and context
-            process = self.codex_launcher.launch_experiment(
-                exp_id=cont_id,
-                worktree_path=worktree_path,
-                task_markdown_path=task_path,
-                gpu_allocation=allocation,
-                context=context
+Your task: Implement the improvements described below in the existing codebase.
+DO NOT start from scratch - build on what already exists in this worktree.
+
+Output files should use the continuation ID: {cont_id}
+- Result file: result_{cont_id}.json
+- Submission file: submission_{cont_id}.csv
+- Done marker: DONE_{cont_id}
+
+"""
+
+            # Prepare stdin for Codex
+            stdin_input = f"""{continuation_context}
+{hardware_info}
+**TASK:**
+{task_content}
+
+Please execute the continuation experiment exactly as described above. Ensure you:
+1. Create the result_{cont_id}.json file with the score
+2. Create the DONE_{cont_id} file when complete
+3. Save predictions to submission_{cont_id}.csv
+"""
+
+            # Start codex exec in background with --json flag for JSONL output
+            codex_config = self.config.get("codex", {})
+            cmd = ['codex', 'exec', '--json']
+
+            if codex_config.get("skip_confirmation", True):
+                cmd.append('--skip-git-repo-check')
+
+            process = subprocess.Popen(
+                cmd,
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                cwd=worktree_path,
+                text=True,
+                env=env
             )
+
+            # Send stdin asynchronously (avoid blocking)
+            if process.stdin:
+                process.stdin.write(stdin_input)
+                process.stdin.close()
+
+            self.logger.info(f"Launched Codex continuation process for {cont_id} in {worktree_path}")
             return process
+
+        except FileNotFoundError as e:
+            self.logger.error(f"Codex CLI not found or task file missing. Error: {e}")
+            return None
         except Exception as e:
             self.logger.error(f"Failed to launch Codex for continuation {cont_id}: {e}")
             return None
