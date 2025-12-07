@@ -1,0 +1,24 @@
+{
+  "name": "kaggle_automation",
+  "version": "1.0.0",
+  "description": "An intelligent system that simulates autonomous participation in Kaggle competitions using multiple AI agents working in parallel.",
+  "main": "index.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/harutasti/kaggle_automation.git"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "commonjs",
+  "bugs": {
+    "url": "https://github.com/harutasti/kaggle_automation/issues"
+  },
+  "homepage": "https://github.com/harutasti/kaggle_automation#readme",
+  "devDependencies": {
+    "playwright": "^1.57.0"
+  }
+}

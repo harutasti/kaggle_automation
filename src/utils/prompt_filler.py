@@ -147,6 +147,13 @@ class PromptFiller:
         placeholders["evaluation_metric"] = competition_info.get("evaluation_metric", "[ASSUMED: accuracy]")
         placeholders["submission_format"] = competition_info.get("submission_format", "[ASSUMED: csv with id and prediction columns]")
 
+        # Metric direction
+        higher_is_better = competition_info.get("higher_is_better", True)
+        placeholders["metric_direction"] = "higher is better" if higher_is_better else "lower is better"
+        placeholders["metric_direction_explanation"] = (
+            "maximize the score" if higher_is_better else "minimize the score"
+        )
+
         # Dataset statistics
         placeholders.update(dataset_analysis)
 

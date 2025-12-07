@@ -4,6 +4,7 @@
 - Competition: {{COMPETITION_NAME}}
 - Goal / target definition: {{COMPETITION_OBJECTIVE}}
 - Evaluation metric: {{EVALUATION_METRIC}}
+- Metric direction: {{METRIC_DIRECTION}} ({{METRIC_DIRECTION_EXPLANATION}})
 - Key deadlines or iteration cadence: {{DEADLINES_AND_CADENCE}}
 
 ## Rules and Submission Requirements

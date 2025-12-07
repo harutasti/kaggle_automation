@@ -10,7 +10,7 @@ from typing import Optional, List, Dict, Any
 
 from .base_component import BaseComponent
 from ..data_models import CompetitionInfo
-from ..utils.file_utils import ensure_dir
+from ..utils.file_utils import ensure_dir, is_higher_better_from_leaderboard
 from ..utils.crawler_parser import parse_competition_info
 from ..utils.dataset_analyzer import DatasetAnalyzer
 
@@ -162,6 +162,9 @@ class KaggleInterfaceManager(BaseComponent):
                 f"Visit https://www.kaggle.com/competitions/{competition_ref} for details."
             )
 
+        # Determine metric direction from leaderboard
+        higher_is_better = is_higher_better_from_leaderboard(competition_ref, evaluation_metric)
+
         return CompetitionInfo(
             name=getattr(target_competition, "title", competition_ref),
             evaluation_metric=evaluation_metric,
@@ -169,6 +172,7 @@ class KaggleInterfaceManager(BaseComponent):
             description_markdown=description,
             data_files=data_files,
             competition_type=getattr(target_competition, "category", None),
+            higher_is_better=higher_is_better,
         )
 
     def get_competition_info(self) -> Optional[CompetitionInfo]:
@@ -213,7 +217,8 @@ class KaggleInterfaceManager(BaseComponent):
                     evaluation_metric="AUC",
                     deadline=dummy_deadline,
                     description_markdown=f"# Competition: {self.competition_name}\n\nThis is a dummy competition description.\nGoal: Predict the target variable.\nMetric: AUC",
-                    data_files=["train.csv", "test.csv", "sample_submission.csv"]
+                    data_files=["train.csv", "test.csv", "sample_submission.csv"],
+                    higher_is_better=True  # AUC: higher is better
                 )
                 self.logger.info(f"Generated dummy competition info for: {self.competition_name}")
             else:

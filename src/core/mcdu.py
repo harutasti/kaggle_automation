@@ -656,7 +656,8 @@ class MasterControllerDecisionUnit(BaseComponent):
                 self.logger.info(f"  {orig_id} -> {cont_id}")
 
         if self.best_score_overall is not None:
-            self.logger.info(f"Overall Best Score: {self.best_score_overall:.4f}")
+            direction = "higher is better" if self.pa.higher_is_better else "lower is better"
+            self.logger.info(f"Overall Best Score: {self.best_score_overall:.4f} ({direction})")
             self.logger.info(f"Best Experiment ID: {self.best_experiment_id_overall}")
             # Display details of best result (from RAD)
             best_result = self.rad.get_result(self.best_experiment_id_overall)

@@ -5,6 +5,7 @@
 - strategy_name: {{STRATEGY_NAME}}
 - primary_objective: {{PRIMARY_OBJECTIVE}}
 - target_metric: {{TARGET_METRIC}}
+- metric_direction: {{METRIC_DIRECTION}} ({{METRIC_DIRECTION_EXPLANATION}})
 - validation_scheme: {{VALIDATION_SCHEME}}
 - data_scope: {{DATA_SCOPE}}
 - expected_outcome: {{EXPECTED_OUTCOME}}

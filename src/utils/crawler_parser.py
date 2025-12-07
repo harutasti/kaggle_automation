@@ -3,7 +3,7 @@ import re
 import datetime
 from typing import Optional, List, Dict, Any
 from ..data_models import CompetitionInfo
-from .file_utils import read_markdown
+from .file_utils import read_markdown, is_higher_better_from_leaderboard
 
 
 def parse_competition_info(competition_id: str, crawler_output_dir: str = "kaggle_competitions") -> Optional[CompetitionInfo]:
@@ -104,12 +104,16 @@ def parse_competition_info(competition_id: str, crawler_output_dir: str = "kaggl
         if content_match:
             description_markdown = content_match.group(1).strip()
     
+    # Determine metric direction from leaderboard
+    higher_is_better = is_higher_better_from_leaderboard(competition_id, evaluation_metric)
+
     return CompetitionInfo(
         name=name,
         evaluation_metric=evaluation_metric,
         deadline=deadline,
         description_markdown=description_markdown,
-        data_files=data_files
+        data_files=data_files,
+        higher_is_better=higher_is_better,
     )
 
 

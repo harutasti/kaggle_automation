@@ -47,6 +47,7 @@ class CompetitionInfo:
     competition_subtype: Optional[str] = None  # "binary", "multiclass", "continuous", etc.
     initial_insights: Optional[List[Dict[str, Any]]] = None  # AI-provided feature engineering suggestions
     data_warnings: Optional[List[str]] = None  # Data quality warnings from analysis
+    higher_is_better: bool = True  # True if higher scores are better (e.g., accuracy), False otherwise (e.g., RMSE)
 
 @dataclasses.dataclass
 class ExperimentHypothesis:

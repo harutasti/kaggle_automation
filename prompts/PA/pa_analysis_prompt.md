@@ -45,6 +45,7 @@ The quality of your analysis directly determines:
 
 **Competition:** {competition_name}
 **Evaluation Metric:** {evaluation_metric}
+**Metric Direction:** {metric_direction} (i.e., {metric_direction_explanation})
 **Current Best Score:** {best_score}
 **Iteration:** {iteration_number} of {max_iterations}
 **Time Remaining:** {time_remaining}
