@@ -558,16 +558,25 @@ Please execute the experiment exactly as described above. Ensure you:
 
     def _finalize_completed_experiment(self, exp_id: str, process: subprocess.Popen, worktree_path: str):
         """Finalize a completed experiment."""
-        # Terminate process if still running
+        # Gracefully wait for Codex process to exit after completion markers
         if process and process.poll() is None:
-            self.logger.warning(f"Process for {exp_id} still running at completion. Terminating.")
-            try:
-                process.terminate()
-                time.sleep(2)
-                if process.poll() is None:
-                    process.kill()
-            except Exception as e:
-                self.logger.error(f"Error terminating process {exp_id}: {e}")
+            grace_seconds = self.config.get("process_completion_grace_seconds", 120)
+            if grace_seconds > 0:
+                self.logger.info(f"Process for {exp_id} still running at completion. Waiting up to {grace_seconds}s before terminating.")
+                try:
+                    process.wait(timeout=grace_seconds)
+                except subprocess.TimeoutExpired:
+                    pass
+
+            if process.poll() is None:
+                self.logger.warning(f"Process for {exp_id} still running after grace period. Terminating.")
+                try:
+                    process.terminate()
+                    time.sleep(2)
+                    if process.poll() is None:
+                        process.kill()
+                except Exception as e:
+                    self.logger.error(f"Error terminating process {exp_id}: {e}")
 
         # Save JSONL output
         self._save_codex_jsonl_output(exp_id, process, worktree_path)
