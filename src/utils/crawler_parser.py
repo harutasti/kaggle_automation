@@ -40,26 +40,59 @@ def parse_competition_info(competition_id: str, crawler_output_dir: str = "kaggl
     
     # Extract evaluation metric
     evaluation_metric = "Unknown"
-    # Look for common metric patterns
-    metric_patterns = [
-        r'Submissions are evaluated[^.]+?(\w+(?:\s+\w+)*)',
-        r'Evaluation[^:]*:\s*(\w+(?:\s+\w+)*)',
-        r'metric[^:]*:\s*(\w+(?:\s+\w+)*)',
-        r'scored[^.]+?(\w+(?:\s+\w+)*)',
-    ]
-    
-    for pattern in metric_patterns:
-        match = re.search(pattern, overview_content, re.IGNORECASE)
-        if match:
-            evaluation_metric = match.group(1).strip()
-            break
-    
+
+    # First, check for explicit metric mentions
+    # Pattern: "## Metric\n...accuracy..." or similar
+    metric_section_match = re.search(r'##\s*(?:Evaluation\s*)?Metric[s]?\s*\n(.+?)(?=##|\Z)', overview_content, re.IGNORECASE | re.DOTALL)
+    if metric_section_match:
+        metric_text = metric_section_match.group(1).strip()
+        # Look for known metrics in the section
+        metric_keywords = [
+            ('accuracy', 'Accuracy'),
+            ('auc', 'AUC'),
+            ('roc', 'AUC-ROC'),
+            ('f1', 'F1 Score'),
+            ('log loss', 'Log Loss'),
+            ('logloss', 'Log Loss'),
+            ('rmse', 'RMSE'),
+            ('rmsle', 'RMSLE'),
+            ('mae', 'MAE'),
+            ('mse', 'MSE'),
+            ('precision', 'Precision'),
+            ('recall', 'Recall'),
+            ('mean squared error', 'MSE'),
+            ('root mean squared', 'RMSE'),
+            ('quadratic weighted kappa', 'QWK'),
+        ]
+        for keyword, metric_name in metric_keywords:
+            if keyword in metric_text.lower():
+                evaluation_metric = metric_name
+                break
+
+    # Fallback patterns if metric section not found
+    if evaluation_metric == "Unknown":
+        metric_patterns = [
+            r'Submissions are evaluated[^.]+?using\s+(?:the\s+)?(\w+(?:\s+\w+)*)',
+            r'Evaluation[^:]*:\s*(\w+(?:\s+\w+)*)',
+            r'metric[^:]*:\s*(\w+(?:\s+\w+)*)',
+            r'scored[^.]+?(\w+(?:\s+\w+)*)',
+        ]
+
+        for pattern in metric_patterns:
+            match = re.search(pattern, overview_content, re.IGNORECASE)
+            if match:
+                evaluation_metric = match.group(1).strip()
+                break
+
     # For regression competitions, check for RMSE, MAE, etc.
-    if "regression" in competition_id.lower() or "regression" in overview_content.lower():
-        if "RMSE" in overview_content or "root mean" in overview_content.lower():
-            evaluation_metric = "RMSE"
-        elif "MAE" in overview_content or "mean absolute" in overview_content.lower():
-            evaluation_metric = "MAE"
+    if evaluation_metric == "Unknown":
+        if "regression" in competition_id.lower() or "regression" in overview_content.lower():
+            if "RMSE" in overview_content or "root mean" in overview_content.lower():
+                evaluation_metric = "RMSE"
+            elif "RMSLE" in overview_content or "root mean squared log" in overview_content.lower():
+                evaluation_metric = "RMSLE"
+            elif "MAE" in overview_content or "mean absolute" in overview_content.lower():
+                evaluation_metric = "MAE"
     
     # Extract deadline (if available)
     deadline = None

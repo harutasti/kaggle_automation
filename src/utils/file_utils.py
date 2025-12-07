@@ -111,29 +111,25 @@ def is_higher_better_from_leaderboard(competition_name: str, metric: str = None)
         submissions = lb.get('submissions', [])
 
         if len(submissions) >= 2:
-            # Compare first and second place scores
-            first_score = float(submissions[0]['score'])
-            second_score = float(submissions[1]['score'])
+            # Get scores as floats
+            scores = [float(s['score']) for s in submissions[:100]]  # Check up to 100 entries
 
-            # Leaderboard is sorted by rank, so first is better than second
-            # If first_score > second_score, higher is better
-            # If first_score < second_score, lower is better
-            if first_score > second_score:
-                logger.info(f"Leaderboard analysis: higher is better (top={first_score}, 2nd={second_score})")
-                return True
-            elif first_score < second_score:
-                logger.info(f"Leaderboard analysis: lower is better (top={first_score}, 2nd={second_score})")
-                return False
-            else:
-                # Scores are equal, check more entries or fall back
-                for i in range(2, min(10, len(submissions))):
-                    other_score = float(submissions[i]['score'])
-                    if first_score > other_score:
-                        logger.info(f"Leaderboard analysis: higher is better")
+            # Find first pair of different scores to determine direction
+            first_score = scores[0]
+            for i, score in enumerate(scores[1:], 1):
+                if score != first_score:
+                    # Leaderboard is sorted by rank, so first is better than later
+                    # If first_score > later_score, higher is better
+                    # If first_score < later_score, lower is better
+                    if first_score > score:
+                        logger.info(f"Leaderboard analysis: higher is better (rank 1={first_score}, rank {i+1}={score})")
                         return True
-                    elif first_score < other_score:
-                        logger.info(f"Leaderboard analysis: lower is better")
+                    else:
+                        logger.info(f"Leaderboard analysis: lower is better (rank 1={first_score}, rank {i+1}={score})")
                         return False
+
+            # All scores in top 100 are identical - very unusual, fall back to heuristic
+            logger.warning(f"All top {len(scores)} leaderboard scores are identical ({first_score}), using metric heuristic")
 
     except Exception as e:
         logger.warning(f"Failed to check leaderboard for metric direction: {e}")
