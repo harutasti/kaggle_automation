@@ -193,11 +193,11 @@ class MasterControllerDecisionUnit(BaseComponent):
                 if not last_analysis or not last_analysis.experiment_decisions:
                     self.logger.warning("No evolution decisions available. Running PA with evolution decisions...")
                     # Re-run PA with evolution decisions
-                    experiment_ids_for_decisions = list(self.persistent_experiments.keys())
+                    # NOTE: Do not pass experiment_ids - let PA derive them from results
+                    # to ensure consistency between prompt IDs and validation IDs
                     last_analysis = self.pa.analyze_with_evolution_decisions(
                         iteration=last_iteration,
                         results=prior_results,
-                        experiment_ids=experiment_ids_for_decisions,
                         official_scores=prior_official_scores
                     )
                     if last_analysis:
@@ -340,11 +340,11 @@ class MasterControllerDecisionUnit(BaseComponent):
                     self.user_confirm.show_warning("Skipping performance analysis for this iteration")
                 else:
                     # Use evolution decisions mode for PA
-                    experiment_ids_for_decisions = list(self.persistent_experiments.keys())
+                    # NOTE: Do not pass experiment_ids - let PA derive them from results
+                    # to ensure consistency between prompt IDs and validation IDs
                     analysis_result = self.pa.analyze_with_evolution_decisions(
                         iteration=self.current_iteration,
                         results=iteration_results,
-                        experiment_ids=experiment_ids_for_decisions,
                         official_scores=official_scores
                     )
 
