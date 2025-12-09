@@ -174,9 +174,19 @@ class ResultAggregatorDatabase(BaseComponent):
             collected_log_path_relative = None  # If log missing
 
         # Other potential outputs (submission, model, etc.)
-        # First try exact matches for expected file names
-        exact_files = [f"submission_{exp_id}.csv", f"model_{exp_id}.pkl"]
-        for fname in exact_files:
+        # Submission/model files: prefer exact, then a single fallback
+        submission_candidates = [f"submission_{exp_id}.csv", "submission.csv"]
+        for fname in submission_candidates:
+            src_path = os.path.join(worktree_path, fname)
+            if os.path.exists(src_path):
+                dst_relative = os.path.join(exp_id, f"submission_{exp_id}.csv")
+                dst_absolute = os.path.join(self.results_base_dir, dst_relative)
+                copy_file(src_path, dst_absolute)
+                collected_files_relative.append(dst_relative)
+                break  # copy at most one submission to avoid mixing iterations
+
+        model_candidates = [f"model_{exp_id}.pkl"]
+        for fname in model_candidates:
             src_path = os.path.join(worktree_path, fname)
             if os.path.exists(src_path):
                 dst_relative = os.path.join(exp_id, fname)
@@ -184,16 +194,8 @@ class ResultAggregatorDatabase(BaseComponent):
                 copy_file(src_path, dst_absolute)
                 collected_files_relative.append(dst_relative)
 
-        # Then glob for common submission/prediction file patterns
-        # This catches files like: predictions.csv, submission_final.csv, submission.csv, output.csv
-        glob_patterns = [
-            "*submission*.csv",
-            "*prediction*.csv",
-            "output.csv",
-            "*.pkl",
-            "*.joblib"
-        ]
-
+        # Limited globbing for model artifacts only (avoid sweeping prior submissions)
+        glob_patterns = ["*.pkl", "*.joblib"]
         for pattern in glob_patterns:
             matching_files = glob.glob(os.path.join(worktree_path, pattern))
             for src_path in matching_files:
@@ -201,11 +203,11 @@ class ResultAggregatorDatabase(BaseComponent):
                 dst_relative = os.path.join(exp_id, fname)
                 dst_absolute = os.path.join(self.results_base_dir, dst_relative)
 
-                # Skip if already copied (from exact matches)
+                # Skip if already copied
                 if dst_relative not in collected_files_relative:
                     copy_file(src_path, dst_absolute)
                     collected_files_relative.append(dst_relative)
-                    self.logger.info(f"Collected file via glob pattern '{pattern}': {fname}")
+                    self.logger.info(f"Collected model artifact via glob pattern '{pattern}': {fname}")
 
         # Copy JSONL output to codex-responses/WAA/ directory
         codex_output_jsonl = os.path.join(worktree_path, f"codex_output_{exp_id}.jsonl")

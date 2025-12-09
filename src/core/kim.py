@@ -7,6 +7,7 @@ import sys
 import json
 from pathlib import Path
 from typing import Optional, List, Dict, Any
+from kaggle.rest import ApiException
 
 from .base_component import BaseComponent
 from ..data_models import CompetitionInfo
@@ -418,11 +419,29 @@ class KaggleInterfaceManager(BaseComponent):
                 self.logger.error(f"Submission failed: {result.error}")
                 self._log_end(method_name, result=False)
                 return False
-                
+            
             self.logger.info(f"Submission successful. Result: {result}")
             self._log_end(method_name, result=True)
             return True
 
+        except ApiException as e:
+            # Explicitly handle common Kaggle rule-acceptance failure
+            error_payload = ""
+            try:
+                error_payload = json.loads(e.body or "{}").get("message", "")
+            except Exception:
+                error_payload = e.body if isinstance(e.body, str) else str(e)
+
+            if e.status == 403 and "rule" in str(error_payload).lower():
+                self.logger.critical(
+                    "Kaggle rejected the submission with 403: competition rules not accepted.\n"
+                    f"Please accept the rules at https://www.kaggle.com/competitions/{self.competition_name}/rules "
+                    "and re-run. Aborting all iterations to avoid repeated failures."
+                )
+                sys.exit(1)
+
+            self._log_error(method_name, e)
+            return False
         except Exception as e:
             self._log_error(method_name, e)
             return False

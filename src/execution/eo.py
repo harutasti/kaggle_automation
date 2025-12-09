@@ -248,12 +248,16 @@ class ExperimentOrchestrator(BaseComponent):
                 # Run uv sync to install dependencies
                 try:
                     self.logger.info(f"Running 'uv sync' in worktree: {worktree_path}")
+                    uv_env = os.environ.copy()
+                    # Ensure per-worktree environment by ignoring parent virtualenv
+                    uv_env.pop("VIRTUAL_ENV", None)
                     result = subprocess.run(
                         ['uv', 'sync'],
                         cwd=worktree_path,
                         capture_output=True,
                         text=True,
-                        timeout=300  # 5 minutes timeout
+                        timeout=300,  # 5 minutes timeout
+                        env=uv_env
                     )
                     if result.returncode != 0:
                         self.logger.error(f"uv sync failed for {exp_id}: {result.stderr}")
@@ -468,9 +472,13 @@ Please execute the experiment exactly as described above. Ensure you:
             # 2. Check status-based completion
             if current_status:
                 if current_status.status == SessionStatus.COMPLETE:
-                    # Training complete, collect results
-                    self._finalize_completed_experiment(exp_id, process, worktree_path)
-                    completed_ids.append(exp_id)
+                    # Only finalize after Codex process has actually exited
+                    if process.poll() is None:
+                        self.logger.debug(f"Experiment {exp_id} marked COMPLETE but process still running; waiting.")
+                        still_active_processes[exp_id] = (process, worktree_path)
+                    else:
+                        self._finalize_completed_experiment(exp_id, process, worktree_path)
+                        completed_ids.append(exp_id)
                     continue
                 elif current_status.status == SessionStatus.ERROR:
                     # Error state, mark failed and collect what we can
@@ -493,8 +501,12 @@ Please execute the experiment exactly as described above. Ensure you:
 
             # 3. Fallback: check DONE file (backward compatibility)
             if os.path.exists(done_file_path):
-                self._finalize_completed_experiment(exp_id, process, worktree_path)
-                completed_ids.append(exp_id)
+                if process.poll() is None:
+                    self.logger.debug(f"DONE file present for {exp_id} but process still running; waiting.")
+                    still_active_processes[exp_id] = (process, worktree_path)
+                else:
+                    self._finalize_completed_experiment(exp_id, process, worktree_path)
+                    completed_ids.append(exp_id)
             elif process.poll() is not None:
                 # Process exited without DONE or status file
                 self._handle_unexpected_exit(exp_id, process, worktree_path)
@@ -558,25 +570,10 @@ Please execute the experiment exactly as described above. Ensure you:
 
     def _finalize_completed_experiment(self, exp_id: str, process: subprocess.Popen, worktree_path: str):
         """Finalize a completed experiment."""
-        # Gracefully wait for Codex process to exit after completion markers
+        # Do not kill or wait—finalization should only occur after the process has exited
         if process and process.poll() is None:
-            grace_seconds = self.config.get("process_completion_grace_seconds", 120)
-            if grace_seconds > 0:
-                self.logger.info(f"Process for {exp_id} still running at completion. Waiting up to {grace_seconds}s before terminating.")
-                try:
-                    process.wait(timeout=grace_seconds)
-                except subprocess.TimeoutExpired:
-                    pass
-
-            if process.poll() is None:
-                self.logger.warning(f"Process for {exp_id} still running after grace period. Terminating.")
-                try:
-                    process.terminate()
-                    time.sleep(2)
-                    if process.poll() is None:
-                        process.kill()
-                except Exception as e:
-                    self.logger.error(f"Error terminating process {exp_id}: {e}")
+            self.logger.info(f"Process for {exp_id} still running; deferring finalization.")
+            return
 
         # Save JSONL output
         self._save_codex_jsonl_output(exp_id, process, worktree_path)
