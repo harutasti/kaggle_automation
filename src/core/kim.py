@@ -7,7 +7,15 @@ import sys
 import json
 from pathlib import Path
 from typing import Optional, List, Dict, Any
-from kaggle.rest import ApiException
+
+# Kaggle 1.8+ no longer ships kaggle.rest; fall back to requests HTTPError
+try:  # pragma: no cover - import compatibility
+    from kaggle.rest import ApiException  # Kaggle <=1.6
+except ImportError:  # Kaggle >=1.8
+    try:
+        from requests import HTTPError as ApiException  # type: ignore
+    except Exception:  # Last resort
+        ApiException = Exception  # type: ignore
 
 from .base_component import BaseComponent
 from ..data_models import CompetitionInfo
@@ -426,19 +434,24 @@ class KaggleInterfaceManager(BaseComponent):
 
         except ApiException as e:
             # Explicitly handle common Kaggle rule-acceptance failure
+            status_code = getattr(e, "status", None) or getattr(getattr(e, "response", None), "status_code", None)
             error_payload = ""
             try:
-                error_payload = json.loads(e.body or "{}").get("message", "")
+                body = getattr(e, "body", None)
+                if body:
+                    error_payload = json.loads(body or "{}").get("message", "") or body
             except Exception:
-                error_payload = e.body if isinstance(e.body, str) else str(e)
+                error_payload = getattr(e, "body", "") or str(e)
 
-            if e.status == 403 and "rule" in str(error_payload).lower():
-                self.logger.critical(
-                    "Kaggle rejected the submission with 403: competition rules not accepted.\n"
-                    f"Please accept the rules at https://www.kaggle.com/competitions/{self.competition_name}/rules "
-                    "and re-run. Aborting all iterations to avoid repeated failures."
-                )
-                sys.exit(1)
+            message_str = f"{error_payload}".lower()
+            if (status_code == 403) or ("403" in str(e)) or ("forbidden" in message_str):
+                if "rule" in message_str or "accept" in message_str:
+                    self.logger.critical(
+                        "Kaggle rejected the submission with 403: competition rules not accepted.\n"
+                        f"Please accept the rules at https://www.kaggle.com/competitions/{self.competition_name}/rules "
+                        "and re-run. Aborting all iterations to avoid repeated failures."
+                    )
+                    sys.exit(1)
 
             self._log_error(method_name, e)
             return False
