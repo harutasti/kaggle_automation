@@ -70,7 +70,7 @@ def test_kse_codex_integration():
             for h in hypotheses:
                 print(f"   - {h.experiment_id}: {h.strategy_name}")
         else:
-        print("⚠️  No hypotheses generated")
+            print("⚠️  No hypotheses generated")
 
         # Test subsequent hypothesis generation
         print()
@@ -121,7 +121,7 @@ def test_kse_codex_integration():
             for h in next_hypotheses:
                 print(f"   - {h.experiment_id}: {h.strategy_name}")
         else:
-        print("⚠️  No hypotheses generated")
+            print("⚠️  No hypotheses generated")
 
         print()
         print("✅ KSE Codex integration test completed")
