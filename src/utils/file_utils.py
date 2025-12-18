@@ -107,12 +107,46 @@ def is_higher_better_from_leaderboard(competition_name: str, metric: str = None)
         api = KaggleApi()
         api.authenticate()
 
-        lb = api.competition_view_leaderboard(competition_name)
-        submissions = lb.get('submissions', [])
+        # Kaggle API method naming varies across versions:
+        # - Older: competition_view_leaderboard()
+        # - Newer (kaggle>=1.8): competition_leaderboard_view()
+        if hasattr(api, "competition_view_leaderboard"):
+            lb = api.competition_view_leaderboard(competition_name)
+        elif hasattr(api, "competition_leaderboard_view"):
+            lb = api.competition_leaderboard_view(competition_name)
+        else:
+            raise AttributeError(
+                "KaggleApi has no supported leaderboard view method "
+                "(expected competition_view_leaderboard or competition_leaderboard_view)"
+            )
 
-        if len(submissions) >= 2:
-            # Get scores as floats
-            scores = [float(s['score']) for s in submissions[:100]]  # Check up to 100 entries
+        # Normalize leaderboard payload to a list of submissions.
+        submissions = []
+        if isinstance(lb, dict):
+            submissions = lb.get("submissions", []) or []
+        elif isinstance(lb, list):
+            submissions = lb
+        else:
+            submissions_attr = getattr(lb, "submissions", None)
+            if submissions_attr:
+                submissions = submissions_attr
+
+        # Extract scores (handle dict submissions or SDK objects).
+        scores = []
+        for submission in submissions[:100]:  # Check up to 100 entries
+            raw_score = None
+            if isinstance(submission, dict):
+                raw_score = submission.get("score")
+            else:
+                raw_score = getattr(submission, "score", None)
+            if raw_score is None:
+                continue
+            try:
+                scores.append(float(raw_score))
+            except (TypeError, ValueError):
+                continue
+
+        if len(scores) >= 2:
 
             # Find first pair of different scores to determine direction
             first_score = scores[0]
