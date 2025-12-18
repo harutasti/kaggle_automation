@@ -106,6 +106,6 @@ def main():
 
 if __name__ == "__main__":
     if not os.path.exists(".git"):
-         print("Error: Not a Git repository. Please run 'git init' in the project root directory first.")
-         sys.exit(1)
+        print("Error: Not a Git repository. Please run 'git init' in the project root directory first.")
+        sys.exit(1)
     main()

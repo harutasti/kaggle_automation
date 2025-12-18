@@ -2,6 +2,7 @@ import os
 from typing import List, Optional, Dict, Any
 import datetime
 import json
+import re
 from pathlib import Path
 
 from ..core.base_component import BaseComponent
@@ -13,6 +14,7 @@ from ..utils.pa_parser import (
     parse_evolution_decisions, validate_evolution_decisions, generate_decision_retry_prompt
 )
 from ..utils.prompt_filler import PromptFiller
+from ..utils.dry_run import stable_hash_int, write_jsonl_agent_message
 
 class PerformanceAnalyzer(BaseComponent):
     def __init__(self, config: dict):
@@ -25,8 +27,10 @@ class PerformanceAnalyzer(BaseComponent):
 
         ensure_dir(self.analysis_dir)
 
-        # Codex configuration driven by simulation_mode
-        self.use_codex = not config.get("simulation_mode", False)
+        # Codex is disabled in dry-run (simulation_mode), but dry-run still exercises
+        # evolution decisions via simulated Codex-like outputs (parsed/validated/retried).
+        self.simulation_mode = config.get("simulation_mode", False)
+        self.use_codex = not self.simulation_mode
         self.max_iterations = config.get("max_iterations", 3)
         self.prompt_filler = PromptFiller(config)
         self.competition_name = config.get("kaggle_competition_name", "unknown")
@@ -380,11 +384,6 @@ class PerformanceAnalyzer(BaseComponent):
         # First, perform standard analysis
         analysis = self.analyze_results(iteration, results, official_scores)
 
-        # If Codex is not enabled, skip evolution decisions
-        if not self.use_codex:
-            self.logger.warning("Codex not enabled, skipping evolution decisions")
-            return analysis
-
         # Get evolution decisions with retry logic
         try:
             # Use provided experiment_ids or derive from results
@@ -465,14 +464,14 @@ class PerformanceAnalyzer(BaseComponent):
                 retry_prompt = generate_decision_retry_prompt(issues, codex_output)
 
                 # Resume PA with retry prompt
-                codex_output = self._resume_pa_for_decisions(iteration, retry_prompt)
+                codex_output = self._resume_pa_for_decisions(iteration, retry_prompt, expected_experiment_ids)
                 retry_count += 1
 
             except ValueError as e:
                 # Parsing failed completely
                 self.logger.warning(f"Failed to parse evolution decisions: {e}")
                 retry_prompt = generate_decision_retry_prompt([str(e)], codex_output)
-                codex_output = self._resume_pa_for_decisions(iteration, retry_prompt)
+                codex_output = self._resume_pa_for_decisions(iteration, retry_prompt, expected_experiment_ids)
                 retry_count += 1
 
         # Should not reach here with max_retries=100, but just in case
@@ -490,9 +489,24 @@ class PerformanceAnalyzer(BaseComponent):
 
         Returns the raw Codex output text.
         """
-        # Prepare prompt with evolution decisions requirement
-        prompt = self._prepare_pa_prompt_with_decisions(iteration, results, analysis, official_scores)
+        # Dry-run: generate a Codex-like markdown output (with a YAML decisions block) and
+        # intentionally omit required fields on the first pass to exercise retry logic.
+        if self.simulation_mode:
+            output = self._dry_run_generate_decisions_output(
+                iteration=iteration,
+                results=results,
+                official_scores=official_scores,
+                invalid_first_pass=True
+            )
+            codex_responses_dir = Path(self.experiment_run_dir) / "codex-responses" / "PA"
+            write_jsonl_agent_message(
+                codex_responses_dir / f"response-{iteration}-evolution.jsonl",
+                output
+            )
+            return output
 
+        # Real mode: call Codex for decisions
+        prompt = self._prepare_pa_prompt_with_decisions(iteration, results, analysis, official_scores)
         codex_responses_dir = os.path.join(self.experiment_run_dir, "codex-responses")
 
         codex_result = execute_codex(
@@ -509,24 +523,43 @@ class PerformanceAnalyzer(BaseComponent):
         if not codex_result.success:
             raise RuntimeError(f"Codex PA execution failed: {codex_result.error}")
 
-        # Read the output
         if codex_result.output_file:
             output_path = os.path.join(self.worktrees_dir, codex_result.output_file)
             if os.path.exists(output_path):
                 with open(output_path, 'r') as f:
                     return f.read()
 
-        # Extract text from JSONL output (--json mode returns JSONL events)
         return extract_text_from_jsonl(codex_result.raw_output or "")
 
-    def _resume_pa_for_decisions(self, iteration: int, retry_prompt: str) -> str:
+    def _resume_pa_for_decisions(
+        self,
+        iteration: int,
+        retry_prompt: str,
+        expected_experiment_ids: Optional[List[str]] = None
+    ) -> str:
         """
         Resume PA session with a retry prompt to fix decision format.
 
         Returns the new Codex output text.
         """
-        codex_responses_dir = os.path.join(self.experiment_run_dir, "codex-responses")
+        if self.simulation_mode:
+            # Always return a valid corrected output on retry.
+            output = self._dry_run_generate_decisions_output(
+                iteration=iteration,
+                results=None,
+                official_scores=None,
+                invalid_first_pass=False,
+                retry_prompt=retry_prompt,
+                expected_experiment_ids=expected_experiment_ids
+            )
+            codex_responses_dir = Path(self.experiment_run_dir) / "codex-responses" / "PA"
+            write_jsonl_agent_message(
+                codex_responses_dir / f"response-{iteration}-decision_retry.jsonl",
+                output
+            )
+            return output
 
+        codex_responses_dir = os.path.join(self.experiment_run_dir, "codex-responses")
         codex_result = execute_codex(
             mode=CodexMode.PA,
             results_data=retry_prompt,
@@ -547,8 +580,108 @@ class PerformanceAnalyzer(BaseComponent):
                 with open(output_path, 'r') as f:
                     return f.read()
 
-        # Extract text from JSONL output (--json mode returns JSONL events)
         return extract_text_from_jsonl(codex_result.raw_output or "")
+
+    def _dry_run_generate_decisions_output(
+        self,
+        iteration: int,
+        results: Optional[List[ExperimentResult]],
+        official_scores: Optional[Dict[str, float]],
+        invalid_first_pass: bool,
+        retry_prompt: Optional[str] = None,
+        expected_experiment_ids: Optional[List[str]] = None,
+    ) -> str:
+        """
+        Generate a Codex-like markdown response containing an evolution decisions YAML block.
+
+        For invalid_first_pass=True, intentionally omits required fields to trigger retry validation.
+        On retry, returns a corrected YAML block that should pass validate_evolution_decisions().
+        """
+        # Recover experiment ids from retry_prompt if needed (retry call path).
+        exp_ids: List[str] = []
+        if results:
+            exp_ids = [r.experiment_id for r in results]
+        elif expected_experiment_ids:
+            exp_ids = list(expected_experiment_ids)
+        elif retry_prompt:
+            # Extract experiment IDs from the retry prompt/issues text.
+            exp_ids = list({m.group(1) for m in re.finditer(r"(iter\d+_[A-Za-z0-9_]+)", retry_prompt)})
+
+        # Deterministic ordering by score (or by exp_id if results not provided).
+        score_map: Dict[str, float] = {}
+        if results:
+            for r in results:
+                s = None
+                if official_scores and r.experiment_id in official_scores:
+                    s = official_scores[r.experiment_id]
+                elif r.score is not None:
+                    s = r.score
+                if s is None:
+                    # Treat failures as worst
+                    s = float("-inf") if self.higher_is_better else float("inf")
+                score_map[r.experiment_id] = float(s)
+
+            exp_ids = list(score_map.keys())
+
+            exp_ids.sort(
+                key=lambda eid: score_map.get(eid, float("-inf")),
+                reverse=self.higher_is_better
+            )
+        else:
+            exp_ids = sorted(exp_ids)
+
+        if not exp_ids:
+            return "DRY-RUN: No experiments to decide on."
+
+        total = len(exp_ids)
+        if total <= 1:
+            terminate_count = 0
+        else:
+            # Always terminate at least 1 (when possible) to exercise archival + new-slot generation.
+            terminate_count = 1 + (stable_hash_int(f"pa:{iteration}:terminate") % 2)
+            terminate_count = min(terminate_count, total - 1)
+        continue_count = total - terminate_count
+
+        continue_ids = exp_ids[:continue_count]
+        terminate_ids = exp_ids[continue_count:]
+
+        # Build YAML decisions list
+        yaml_lines = ["decisions:"]
+        priority = 1
+
+        for eid in continue_ids:
+            yaml_lines.append(f"  - experiment_id: \"{eid}\"")
+            yaml_lines.append("    decision: CONTINUE")
+            yaml_lines.append("    confidence: 0.85")
+            yaml_lines.append("    reasoning: \"Dry-run: top-performing experiment; continue for incremental gains.\"")
+            if not invalid_first_pass:
+                yaml_lines.append("    improvement_instructions: |")
+                yaml_lines.append("      1. Tighten CV and add leakage checks.")
+                yaml_lines.append("      2. Expand hyperparameter search around the current best region.")
+            yaml_lines.append("    potential_ceiling: 0.99")
+            yaml_lines.append(f"    priority_rank: {priority}")
+            priority += 1
+
+        for eid in terminate_ids:
+            yaml_lines.append(f"  - experiment_id: \"{eid}\"")
+            yaml_lines.append("    decision: TERMINATE")
+            yaml_lines.append("    confidence: 0.75")
+            yaml_lines.append("    reasoning: \"Dry-run: underperforming or unstable; terminate to free a slot.\"")
+            yaml_lines.append("    termination_reason: \"Dry-run: low score or failure status.\"")
+            yaml_lines.append(f"    priority_rank: {priority}")
+            priority += 1
+
+        yaml_lines.append("")
+        yaml_lines.append("summary:")
+        yaml_lines.append(f"  continue_count: {continue_count}")
+        yaml_lines.append(f"  terminate_count: {terminate_count}")
+        yaml_lines.append(f"  new_slots: {terminate_count}")
+
+        yaml_block = "\n".join(yaml_lines)
+        return (
+            f"# Dry-run PA Evolution Decisions (Iteration {iteration})\n\n"
+            f"```yaml\n{yaml_block}\n```\n"
+        )
 
     def _prepare_pa_prompt_with_decisions(
         self,

@@ -9,7 +9,7 @@
   "experiments_base_dir": "./experiments",
   "log_file": "./logs/auto_kaggle.log",
   "log_level": "INFO",
-  "simulation_mode": false,
+  "simulation_mode": true,
   "use_crawler": true,
   "max_discussions": 20,
   "analyze_dataset": true,

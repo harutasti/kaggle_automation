@@ -33,7 +33,9 @@ class KaggleInterfaceManager(BaseComponent):
         self.simulation_mode = config.get("simulation_mode", False)
         ensure_dir(self.download_dir)
 
-        self.api = None if self.simulation_mode else self._authenticate_kaggle()
+        # Dry-run (simulation_mode) still exercises everything except Codex, so Kaggle API is required.
+        # Fail fast on missing/invalid credentials.
+        self.api = self._authenticate_kaggle()
         self.use_crawler = config.get("use_crawler", True)  # Default to using crawler
         self.crawler_output_dir = "kaggle_competitions"
         self.max_discussions = config.get("max_discussions", 20)
@@ -190,7 +192,7 @@ class KaggleInterfaceManager(BaseComponent):
         self._log_start(method_name)
         try:
             # First, try to use crawler data if enabled
-            if self.use_crawler and not self.simulation_mode:
+            if self.use_crawler:
                 # Check if crawler data exists and is complete (has overview file)
                 competition_path = os.path.join(self.crawler_output_dir, self.competition_name)
                 overview_file = os.path.join(competition_path, "pages", f"{self.competition_name}_overview.md")
@@ -217,23 +219,9 @@ class KaggleInterfaceManager(BaseComponent):
                     else:
                         self.logger.warning("Failed to parse crawler data, will try other methods")
             
-            # Fall back to API or simulation
-            if self.simulation_mode:
-                # Dummy data for simulation mode or when API auth failed
-                dummy_deadline = datetime.datetime.now() + datetime.timedelta(days=30)
-                info = CompetitionInfo(
-                    name=self.competition_name,
-                    evaluation_metric="AUC",
-                    deadline=dummy_deadline,
-                    description_markdown=f"# Competition: {self.competition_name}\n\nThis is a dummy competition description.\nGoal: Predict the target variable.\nMetric: AUC",
-                    data_files=["train.csv", "test.csv", "sample_submission.csv"],
-                    higher_is_better=True  # AUC: higher is better
-                )
-                self.logger.info(f"Generated dummy competition info for: {self.competition_name}")
-            else:
-                # Fetch info from real Kaggle API (api is guaranteed non-None here)
-                info = self._get_competition_metadata_from_api()
-                self.logger.info(f"Successfully retrieved info for competition: {info.name}")
+            # Fall back to Kaggle API
+            info = self._get_competition_metadata_from_api()
+            self.logger.info(f"Successfully retrieved info for competition: {info.name}")
 
             self._log_end(method_name, info)
             return info
@@ -249,7 +237,7 @@ class KaggleInterfaceManager(BaseComponent):
             ensure_dir(self.download_dir)
 
             # First, check if crawler has already downloaded the data
-            if self.use_crawler and not self.simulation_mode:
+            if self.use_crawler:
                 crawler_data_dir = os.path.join(self.crawler_output_dir, self.competition_name, "data")
                 if os.path.exists(crawler_data_dir):
                     self.logger.info("Using data files from crawler output")
@@ -273,49 +261,34 @@ class KaggleInterfaceManager(BaseComponent):
                     self._log_end(method_name, result=True)
                     return True
             
-            # Fall back to API or simulation
-            if self.simulation_mode:
-                # Create realistic placeholder data files to mimic a full run
-                placeholders = {
-                    "train.csv": "id,feature1,target\n1,0.1,0\n2,0.2,1\n",
-                    "test.csv": "id,feature1\n1,0.0\n2,0.1\n",
-                    "sample_submission.csv": "id,prediction\n1,0.5\n2,0.5\n",
-                }
-                for filename, content in placeholders.items():
-                    path = os.path.join(self.download_dir, filename)
-                    if not os.path.exists(path):
-                        with open(path, "w", encoding="utf-8") as f:
-                            f.write(content)
-                        self.logger.info(f"Simulation mode: created placeholder {filename}")
-                competition_info.data_files = list(placeholders.keys())
-            elif self.api is None:
+            if self.api is None:
                 raise RuntimeError("Kaggle API is unavailable; cannot download competition data.")
-            else:
-                # Download files from Kaggle API
-                self.logger.info(f"Downloading competition files for {self.competition_name} to {self.download_dir}")
-                
-                # Destination for ZIP download
-                zip_path = os.path.join(self.download_dir, f"{self.competition_name}.zip")
-                
-                # Download the file
-                self.api.competition_download_files(self.competition_name, path=self.download_dir, quiet=False)
-                
-                # Extract the ZIP file
-                if os.path.exists(zip_path):
-                    self.logger.info(f"Extracting downloaded ZIP file: {zip_path}")
-                    with zipfile.ZipFile(zip_path, 'r') as zip_ref:
-                        zip_ref.extractall(self.download_dir)
-                    
-                    # Optionally remove the ZIP after extraction
-                    os.remove(zip_path)
-                    self.logger.info("ZIP file extracted and removed")
-                
-                # Inspect downloaded files
-                downloaded_files = os.listdir(self.download_dir)
-                self.logger.info(f"Downloaded files: {downloaded_files}")
-                
-                # Update data file list
-                competition_info.data_files = [f for f in downloaded_files if os.path.isfile(os.path.join(self.download_dir, f))]
+
+            # Download files from Kaggle API
+            self.logger.info(f"Downloading competition files for {self.competition_name} to {self.download_dir}")
+
+            # Destination for ZIP download
+            zip_path = os.path.join(self.download_dir, f"{self.competition_name}.zip")
+
+            # Download the file
+            self.api.competition_download_files(self.competition_name, path=self.download_dir, quiet=False)
+
+            # Extract the ZIP file
+            if os.path.exists(zip_path):
+                self.logger.info(f"Extracting downloaded ZIP file: {zip_path}")
+                with zipfile.ZipFile(zip_path, 'r') as zip_ref:
+                    zip_ref.extractall(self.download_dir)
+
+                # Optionally remove the ZIP after extraction
+                os.remove(zip_path)
+                self.logger.info("ZIP file extracted and removed")
+
+            # Inspect downloaded files
+            downloaded_files = os.listdir(self.download_dir)
+            self.logger.info(f"Downloaded files: {downloaded_files}")
+
+            # Update data file list
+            competition_info.data_files = [f for f in downloaded_files if os.path.isfile(os.path.join(self.download_dir, f))]
 
             # Analyze dataset if enabled
             if self.analyze_dataset:
@@ -406,10 +379,16 @@ class KaggleInterfaceManager(BaseComponent):
         method_name = "submit_predictions"
         self._log_start(method_name, file_path=file_path, message=message)
         
-        if self.simulation_mode or self.api is None:
-            self.logger.info("Submission skipped (simulation mode or API unavailable).")
-            self._log_end(method_name, result=True)
-            return True
+        # Dry-run explicitly disables submissions to avoid leaderboard side effects.
+        if self.simulation_mode:
+            self.logger.info("Dry-run: Kaggle submission disabled. Skipping.")
+            self._log_end(method_name, result=False)
+            return False
+
+        if self.api is None:
+            self.logger.error("Kaggle API unavailable; cannot submit.")
+            self._log_end(method_name, result=False)
+            return False
 
         try:
             # Confirm file exists
@@ -475,12 +454,15 @@ class KaggleInterfaceManager(BaseComponent):
         method_name = "get_submission_score"
         self._log_start(method_name, wait_timeout=wait_timeout)
 
-        if self.simulation_mode or self.api is None:
-            # Return simulated score for testing or when API unavailable
-            self.logger.info("Returning simulated submission score (simulation mode or API unavailable)")
-            result = {"score": 0.85, "status": "complete", "submission_id": "simulated"}
-            self._log_end(method_name, result=result)
-            return result
+        if self.simulation_mode:
+            self.logger.info("Dry-run: Kaggle submission scoring disabled.")
+            self._log_end(method_name, result=None)
+            return None
+
+        if self.api is None:
+            self.logger.warning("Kaggle API unavailable; cannot fetch submission score.")
+            self._log_end(method_name, result=None)
+            return None
 
         try:
             import time

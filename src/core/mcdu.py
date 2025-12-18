@@ -266,8 +266,9 @@ class MasterControllerDecisionUnit(BaseComponent):
 
             # ================== Common: Wait for completion ==================
             # 2d. Wait for completion & collect results
+            poll_interval_seconds = 1 if self.config.get("simulation_mode", False) else 10
             while running_experiments:
-                time.sleep(10)  # Check every 10 seconds
+                time.sleep(poll_interval_seconds)
                 completed_ids = self.eo.check_running_experiments()
                 newly_completed = running_experiments.intersection(completed_ids)
 
@@ -302,7 +303,11 @@ class MasterControllerDecisionUnit(BaseComponent):
             # 2e. Submit successful experiments to Kaggle and get official scores
             successful_results = [r for r in iteration_results if r.status == "SUCCESS" and r.score is not None]
 
-            if successful_results:
+            # Dry-run (simulation_mode) must not submit artifacts to Kaggle.
+            if self.config.get("simulation_mode", False):
+                if successful_results:
+                    self.logger.info("Dry-run: skipping Kaggle submissions for this iteration")
+            elif successful_results:
                 if self.user_confirm.confirm_iteration_submissions(
                     self.current_iteration,
                     [r.experiment_id for r in successful_results]
@@ -548,8 +553,14 @@ class MasterControllerDecisionUnit(BaseComponent):
                         self.logger.info(f"Archived {decision.experiment_id} to {archived_path}")
                     else:
                         self.logger.warning(f"Failed to archive {decision.experiment_id}")
-                    # Remove from persistent tracking
-                    del self.persistent_experiments[decision.experiment_id]
+                    # Remove from persistent tracking (drop all keys pointing to the same worktree).
+                    keys_to_remove = [
+                        exp_key
+                        for exp_key, path in list(self.persistent_experiments.items())
+                        if path == worktree_path
+                    ]
+                    for exp_key in keys_to_remove:
+                        self.persistent_experiments.pop(exp_key, None)
                 else:
                     self.logger.warning(f"No worktree found for terminated experiment {decision.experiment_id}")
 
@@ -670,20 +681,24 @@ class MasterControllerDecisionUnit(BaseComponent):
                  submission_file = next((f for f in best_result.result_files if 'submission' in f), None)
                  if submission_file:
                       submission_path_absolute = os.path.join(self.rad.results_base_dir, submission_file)
-                      # Confirm submission to Kaggle
-                      if self.user_confirm.confirm_score_submission(
-                          self.best_score_overall,
-                          self.best_experiment_id_overall
-                      ):
-                          self.logger.info(f"Submitting: {submission_path_absolute}")
-                          self.kim.submit_predictions(
-                              submission_path_absolute,
-                              f"Final submission based on {self.best_experiment_id_overall}"
-                          )
-                          self.user_confirm.show_success("Submission completed")
+                      if self.config.get("simulation_mode", False):
+                          self.logger.info("Dry-run: skipping final Kaggle submission")
+                          self.user_confirm.show_status("Dry-run: final submission skipped", "dim")
                       else:
-                          self.logger.info("User skipped final submission")
-                          self.user_confirm.show_status("Submission skipped by user")
+                          # Confirm submission to Kaggle
+                          if self.user_confirm.confirm_score_submission(
+                              self.best_score_overall,
+                              self.best_experiment_id_overall
+                          ):
+                              self.logger.info(f"Submitting: {submission_path_absolute}")
+                              self.kim.submit_predictions(
+                                  submission_path_absolute,
+                                  f"Final submission based on {self.best_experiment_id_overall}"
+                              )
+                              self.user_confirm.show_success("Submission completed")
+                          else:
+                              self.logger.info("User skipped final submission")
+                              self.user_confirm.show_status("Submission skipped by user")
                  else:
                       self.logger.warning("Submission file not found for the best experiment.")
                       self.user_confirm.show_warning("No submission file available for best experiment")

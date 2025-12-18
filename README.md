@@ -99,7 +99,7 @@ Stop conditions live in config (`max_iterations`, `stop_condition.score_threshol
 - Python `>=3.12` (repo includes `.python-version`)
 - Git (required: this system uses Git worktrees)
 - `uv` (used both by the controller and by each experiment worktree)
-- Kaggle credentials (`kaggle.json`) if you want real competition data and submissions
+- Kaggle credentials (`kaggle.json`) for real competition data download (required even in `simulation_mode=true`; submissions only happen in real mode)
 - Codex CLI (`codex`) in PATH if `simulation_mode=false`
 - Playwright browsers if `use_crawler=true` (crawler uses `crawl4ai` + Playwright)
 
@@ -141,7 +141,7 @@ Configs are JSON files in `config/`. The most important keys:
 - `stop_condition`:
   - `score_threshold` (optional)
   - `no_improvement_iterations`
-- `simulation_mode`: if `true`, avoids Codex + Kaggle submissions and uses the simulator
+- `simulation_mode`: if `true`, avoids **Codex calls only** and uses the simulator for WAAs; Kaggle API + crawler/data download still run (submissions are disabled)
 - `use_crawler`: whether to crawl Kaggle pages/discussions with Playwright
 - `experiment_pyproject_path`: per-experiment dependency spec copied into each worktree
 
@@ -161,6 +161,39 @@ Example:
 
 ---
 
+## Simulation Mode (Dry-Run) vs Real Mode
+
+`simulation_mode=true` is designed to verify that **everything other than Codex works end-to-end**, including crawling/downloading data, worktrees, `uv sync`, status/resume, RAD aggregation, PA evolution decisions, and archival.
+
+### What’s the same
+
+- **Kaggle API auth + data download** still runs (and fails fast if credentials are missing/invalid)
+- **Crawler** still runs when `use_crawler=true` (Playwright required)
+- **Git worktrees** are created/reused the same way
+- **Per-worktree `uv sync`** still runs (heavy step is intentionally preserved)
+- **RAD** still collects outputs into `results/` and updates `results_manifest.json`
+- **PA** still writes `analysis/analysis_iter_<n>.md` and produces evolution decisions (CONTINUE/TERMINATE), driving continuation + archival
+
+### What’s different (by component)
+
+- **KIM (KaggleInterfaceManager)**:
+  - Real: can submit predictions + poll for official scores
+  - Dry-run: **never submits** (and therefore no official-score polling); everything else stays real (crawler/API/download/analysis)
+- **MCDU (MasterControllerDecisionUnit)**:
+  - Real: can submit successful iterations + optionally submit final best
+  - Dry-run: skips all Kaggle submissions (iteration + final); run loop/polling is kept fast so the simulator can progress quickly
+- **KSE (KnowledgeStrategyEngine)**:
+  - Real: fills KSE templates by invoking Codex
+  - Dry-run: fills the same templates locally, intentionally leaving some `{{...}}` placeholders and then doing a “resume fill” pass; writes Codex-like JSONL traces under `codex-responses/KSE/`
+- **EO/WAA (ExperimentOrchestrator / Worker Agents)**:
+  - Real: launches `codex exec --json ...` and may trigger `codex resume --last`
+  - Dry-run: launches `src/execution/wca_simulator.py` inside each worktree (`uv run ...`) and triggers simulator `--resume` when the training marker appears; simulator injects deterministic failures while guaranteeing at least one SUCCESS per iteration
+- **PA (PerformanceAnalyzer)**:
+  - Real: can use Codex for deeper analysis + decisions
+  - Dry-run: generates Codex-like decision text and intentionally fails validation on the first pass so the existing parse/validate/retry loop is exercised; writes Codex-like JSONL traces under `codex-responses/PA/`
+
+---
+
 ## Running
 
 ```bash
@@ -177,6 +210,7 @@ uv run python main.py -c config/config.json -y
 Notes:
 - Run from a Git repo root (the program exits if `.git` is missing).
 - In real mode (`simulation_mode=false`), WAAs require the `codex` CLI to be installed.
+- In simulation mode (`simulation_mode=true`), Kaggle credentials are still required (data download is real), but submissions are disabled.
 
 ---
 

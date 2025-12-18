@@ -57,6 +57,9 @@ class ExperimentOrchestrator(BaseComponent):
         self.gpu_allocator = GPUAllocator(config)
         self.logger.info(f"GPU allocator initialized")
 
+        # Dry-run marker prefix used by src/execution/wca_simulator.py
+        self._dry_run_training_done_prefix = "DRYRUN_TRAINING_DONE_"
+
     def _get_git_repo(self):
         """Return the Git repository for the current directory."""
         try:
@@ -320,13 +323,20 @@ class ExperimentOrchestrator(BaseComponent):
                 else:
                     # Simulation mode: use WAA simulator with GPU env vars
                     cmd = [
-                        'python', self.wca_simulator_script,
+                        'uv', 'run', 'python', 'src/execution/wca_simulator.py',
                         '--worktree-path', worktree_path,
                         '--task-markdown-path', hypothesis.task_markdown_path,
                         '--experiment-id', exp_id,
                         '--log-level', self.config.get("log_level", "INFO")
                     ]
-                    process = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, env=env)
+                    process = subprocess.Popen(
+                        cmd,
+                        stdout=subprocess.PIPE,
+                        stderr=subprocess.PIPE,
+                        text=True,
+                        env=env,
+                        cwd=worktree_path
+                    )
 
                 if process:
                     processes_to_start.append((process, exp_id, worktree_path))
@@ -616,6 +626,10 @@ Please execute the experiment exactly as described above. Ensure you:
 
     def _is_training_complete(self, exp_id: str, worktree_path: str) -> bool:
         """Check if training is complete using resource monitoring."""
+        if self.simulation_mode:
+            marker = os.path.join(worktree_path, f"{self._dry_run_training_done_prefix}{exp_id}")
+            return os.path.exists(marker)
+
         # Get or create resource monitor for this experiment
         if exp_id not in self._resource_monitors:
             self._resource_monitors[exp_id] = ResourceMonitor(worktree_path, self.logger)
@@ -628,6 +642,57 @@ Please execute the experiment exactly as described above. Ensure you:
     def _trigger_resume(self, exp_id: str, process: subprocess.Popen, worktree_path: str) -> bool:
         """Trigger Codex resume using `codex resume --last`."""
         self.logger.info(f"Triggering session resume for {exp_id}")
+
+        if self.simulation_mode:
+            # Dry-run: re-run the simulator in resume mode (blocking) to finalize outputs.
+            task_path = os.path.join(worktree_path, f"{exp_id}_task.md")
+            if not os.path.exists(task_path):
+                try:
+                    candidates = [
+                        os.path.join(worktree_path, f)
+                        for f in os.listdir(worktree_path)
+                        if f.endswith("_task.md") and exp_id in f
+                    ]
+                    if candidates:
+                        task_path = candidates[0]
+                except Exception:
+                    pass
+
+            cmd = [
+                "uv", "run", "python", "src/execution/wca_simulator.py",
+                "--worktree-path", worktree_path,
+                "--task-markdown-path", task_path,
+                "--experiment-id", exp_id,
+                "--log-level", self.config.get("log_level", "INFO"),
+                "--resume",
+            ]
+
+            try:
+                result = subprocess.run(
+                    cmd,
+                    cwd=worktree_path,
+                    capture_output=True,
+                    text=True,
+                    timeout=self.config.get("waa_resume_timeout", 600),
+                    check=False
+                )
+                if result.returncode == 0:
+                    self.logger.info(f"Dry-run resume completed for {exp_id}")
+                    self.session_manager.log_session_event(exp_id, "RESUME", SessionStatus.RUNNING)
+                    return True
+
+                self.logger.error(
+                    f"Dry-run resume failed for {exp_id} (exit={result.returncode}). "
+                    f"stdout_tail={result.stdout[-500:] if result.stdout else ''} "
+                    f"stderr_tail={result.stderr[-500:] if result.stderr else ''}"
+                )
+                return False
+            except subprocess.TimeoutExpired:
+                self.logger.error(f"Dry-run resume timed out for {exp_id}")
+                return False
+            except Exception as e:
+                self.logger.error(f"Dry-run resume failed for {exp_id}: {e}")
+                return False
 
         # Read training log for context
         training_log_tail = ""
@@ -790,8 +855,12 @@ Please execute the experiment exactly as described above. Ensure you:
 
                 # Launch experiment using Codex or simulator
                 if self.simulation_mode:
-                    # Simulation mode
-                    process = self._launch_simulation_process(cont_id, worktree_path, task_dst)
+                    # Simulation mode (still exercise GPU allocation env vars)
+                    waa_index = GPUAllocator.parse_waa_index(cont_id)
+                    gpu_allocation = self.gpu_allocator.allocate(waa_index, total_waas)
+                    env = os.environ.copy()
+                    env.update(gpu_allocation.env_vars)
+                    process = self._launch_simulation_process(cont_id, worktree_path, task_dst, env=env)
                 else:
                     # Codex mode - use resume with continuation context
                     process = self._launch_continuation_codex(continuation, worktree_path, task_dst, total_waas)
@@ -919,15 +988,23 @@ Please execute the continuation experiment exactly as described above. Ensure yo
         self,
         exp_id: str,
         worktree_path: str,
-        task_path: str
+        task_path: str,
+        env: Optional[Dict[str, str]] = None
     ) -> Optional[subprocess.Popen]:
         """Launch simulation process for a continuation experiment."""
         try:
             process = subprocess.Popen(
-                ['python', self.wca_simulator_script, exp_id, worktree_path, task_path],
+                [
+                    'uv', 'run', 'python', 'src/execution/wca_simulator.py',
+                    '--worktree-path', worktree_path,
+                    '--task-markdown-path', task_path,
+                    '--experiment-id', exp_id,
+                    '--log-level', self.config.get("log_level", "INFO"),
+                ],
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
-                cwd=worktree_path
+                cwd=worktree_path,
+                env=env or os.environ.copy()
             )
             return process
         except Exception as e:
@@ -980,6 +1057,11 @@ Please execute the continuation experiment exactly as described above. Ensure yo
                 "archive_path": archive_path
             }
 
+            # Worktree directory name corresponds to the branch name used when the worktree was created
+            # (e.g., worktrees/<exp_id> with branch refs/heads/exp/<exp_id>). Continuations reuse the
+            # same worktree, so exp_id may differ from the underlying branch/worktree id.
+            worktree_id = os.path.basename(os.path.normpath(worktree_path))
+
             # Move worktree to archive before running git cleanup to avoid deleting contents
             shutil.move(worktree_path, archive_path)
             self.logger.info(f"Moved worktree to archive: {archive_path}")
@@ -997,7 +1079,7 @@ Please execute the continuation experiment exactly as described above. Ensure yo
 
             # Delete the experiment branch
             try:
-                branch_name = f"exp/{exp_id}"
+                branch_name = f"exp/{worktree_id}"
                 self.repo.git.branch('-D', branch_name)
                 self.logger.info(f"Deleted branch {branch_name}")
             except git.GitCommandError as e:

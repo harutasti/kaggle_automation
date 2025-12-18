@@ -3,6 +3,7 @@ import uuid
 import random
 import json
 import re
+import hashlib
 from pathlib import Path
 from typing import List, Optional, Dict, Any, Tuple
 
@@ -17,6 +18,7 @@ from ..utils.dataset_analyzer import DatasetAnalyzer
 from ..utils.system_specs import SystemSpecsDetector
 from ..utils.codex_executor import CodexMode, execute_codex, CodexResult
 from ..utils.gpu_allocator import GPUAllocator
+from ..utils.dry_run import stable_hash_int, write_jsonl_agent_message
 
 class KnowledgeStrategyEngine(BaseComponent):
     def __init__(self, config: dict):
@@ -38,8 +40,10 @@ class KnowledgeStrategyEngine(BaseComponent):
         self.dataset_analyzer = None  # Will be initialized when needed
         self.dataset_analysis = None  # Cache for dataset analysis
 
-        # Codex execution mode for KSE is driven by simulation_mode
-        self.use_codex_for_generation = not self.simulation_mode
+        # Dry-run (simulation_mode) still exercises the template pipeline, but must not call Codex.
+        # Treat "use_codex_for_generation" as "use the template pipeline" rather than "invoke Codex CLI".
+        self.use_codex_for_generation = True
+        self._codex_cli_enabled = not self.simulation_mode
         self.codex_timeout = config.get("kse_codex_timeout", 600)
 
         # Prompts directory for loading template files
@@ -369,29 +373,47 @@ class KnowledgeStrategyEngine(BaseComponent):
 
         # Execute Codex to fill templates
         codex_responses_dir = os.path.join(self.experiment_run_dir, "codex-responses")
-        try:
-            use_resume = iteration > 0
-            run_label = "initial" if iteration == 0 else "resume"
-            resume_prompt = filled_prompt if use_resume else None
-            codex_result = execute_codex(
-                mode=CodexMode.KSE,
-                prompt_content=filled_prompt,
-                output_dir=str(iteration_dir),
+        if self.simulation_mode:
+            # Dry-run: deterministically "fill" templates locally, leaving some placeholders
+            # so that the resume-fill path is exercised.
+            self._dry_run_fill_templates(
                 iteration=iteration,
-                codex_responses_dir=codex_responses_dir,
-                timeout=self.codex_timeout,
-                logger=self.logger,
-                resume_prompt=resume_prompt,
-                run_label=run_label
+                competition_info=competition_info,
+                exp_ids=exp_ids,
+                common_path=template_info["common_path"],
+                experiment_paths=template_info["experiment_paths"],
+                attempt=0,
             )
-        except Exception as e:
-            self.logger.error(f"Error calling Codex for KSE: {e}")
-            codex_result = CodexResult(
-                success=False,
-                mode=CodexMode.KSE,
-                execution_time=0.0,
-                error=str(e)
+            # Emit a minimal Codex-like JSONL response for parity with real runs.
+            write_jsonl_agent_message(
+                Path(codex_responses_dir) / "KSE" / f"response-{iteration}-{'initial' if iteration == 0 else 'resume'}.jsonl",
+                f"DRY-RUN: simulated KSE template fill (iteration={iteration}, attempt=0)."
             )
+            codex_result = CodexResult(success=True, mode=CodexMode.KSE, execution_time=0.0)
+        else:
+            try:
+                use_resume = iteration > 0
+                run_label = "initial" if iteration == 0 else "resume"
+                resume_prompt = filled_prompt if use_resume else None
+                codex_result = execute_codex(
+                    mode=CodexMode.KSE,
+                    prompt_content=filled_prompt,
+                    output_dir=str(iteration_dir),
+                    iteration=iteration,
+                    codex_responses_dir=codex_responses_dir,
+                    timeout=self.codex_timeout,
+                    logger=self.logger,
+                    resume_prompt=resume_prompt,
+                    run_label=run_label
+                )
+            except Exception as e:
+                self.logger.error(f"Error calling Codex for KSE: {e}")
+                codex_result = CodexResult(
+                    success=False,
+                    mode=CodexMode.KSE,
+                    execution_time=0.0,
+                    error=str(e)
+                )
 
         if not codex_result.success:
             self.logger.warning(f"Codex execution failed: {codex_result.error}")
@@ -428,6 +450,141 @@ class KnowledgeStrategyEngine(BaseComponent):
 
         self.logger.info(f"Successfully prepared {len(hypotheses)} hypotheses from filled templates")
         return hypotheses
+
+    def _dry_run_fill_templates(
+        self,
+        iteration: int,
+        competition_info: CompetitionInfo,
+        exp_ids: List[str],
+        common_path: Path,
+        experiment_paths: List[Path],
+        attempt: int,
+    ) -> None:
+        """
+        Deterministically fill KSE templates without calling Codex.
+
+        attempt=0 intentionally leaves some placeholders so that the resume-fill
+        path is exercised. attempt>=1 fills all remaining placeholders.
+        """
+        # Fill common template
+        common_text = Path(common_path).read_text(encoding="utf-8")
+        common_text = self._dry_run_fill_text(
+            text=common_text,
+            key=f"{competition_info.name}:{iteration}:common:{attempt}",
+            attempt=attempt,
+            fixed={
+                "COMPETITION_NAME": competition_info.name,
+                "EVALUATION_METRIC": competition_info.evaluation_metric,
+                "METRIC_DIRECTION": "higher" if getattr(competition_info, "higher_is_better", True) else "lower",
+                "METRIC_DIRECTION_EXPLANATION": "higher is better" if getattr(competition_info, "higher_is_better", True) else "lower is better",
+            },
+            protect={"COMPETITION_NAME", "EVALUATION_METRIC", "METRIC_DIRECTION", "METRIC_DIRECTION_EXPLANATION"},
+        )
+        Path(common_path).write_text(common_text, encoding="utf-8")
+
+        # Fill per-experiment templates
+        for exp_id, exp_path in zip(exp_ids, experiment_paths):
+            strategy, params = self._dry_run_strategy_and_params(exp_id)
+            exp_text = Path(exp_path).read_text(encoding="utf-8")
+            exp_text = self._dry_run_fill_text(
+                text=exp_text,
+                key=f"{competition_info.name}:{iteration}:{exp_id}:{attempt}",
+                attempt=attempt,
+                fixed={
+                    "EXPERIMENT_ID": exp_id,
+                    "STRATEGY_NAME": strategy,
+                    "PARAMETERS_JSON": json.dumps(params, indent=2),
+                    "TARGET_METRIC": competition_info.evaluation_metric,
+                    "METRIC_DIRECTION": "higher" if getattr(competition_info, "higher_is_better", True) else "lower",
+                    "METRIC_DIRECTION_EXPLANATION": "higher is better" if getattr(competition_info, "higher_is_better", True) else "lower is better",
+                },
+                protect={"EXPERIMENT_ID", "STRATEGY_NAME", "PARAMETERS_JSON", "TARGET_METRIC", "METRIC_DIRECTION", "METRIC_DIRECTION_EXPLANATION"},
+            )
+            Path(exp_path).write_text(exp_text, encoding="utf-8")
+
+    def _dry_run_strategy_and_params(self, exp_id: str) -> tuple[str, Dict[str, Any]]:
+        """Deterministically derive a strategy + params from exp_id."""
+        # Keep in sync with the strategies list for diversity coverage.
+        strategies = [
+            "LightGBM_Optuna",
+            "XGBoost_Baseline",
+            "CatBoost_Categorical",
+            "RandomForest_Quick",
+            "LinearModel_FeatureEng",
+        ]
+        strategy = strategies[stable_hash_int(f"{exp_id}:strategy") % len(strategies)]
+
+        # Deterministic but plausible params (not actually used by the simulator).
+        def u(suffix: str, low: float, high: float) -> float:
+            n = stable_hash_int(f"{exp_id}:{suffix}") % 1_000_000
+            return low + (high - low) * (n / 1_000_000.0)
+
+        if "LightGBM" in strategy:
+            params = {
+                "learning_rate": round(u("lr", 0.005, 0.2), 5),
+                "n_estimators": int(50 + (stable_hash_int(f"{exp_id}:n_est") % 950)),
+                "num_leaves": int(16 + (stable_hash_int(f"{exp_id}:leaves") % 240)),
+            }
+        elif "XGBoost" in strategy:
+            params = {
+                "eta": round(u("eta", 0.01, 0.3), 5),
+                "max_depth": int(3 + (stable_hash_int(f"{exp_id}:depth") % 8)),
+                "subsample": round(u("subsample", 0.6, 1.0), 3),
+            }
+        elif "CatBoost" in strategy:
+            params = {
+                "learning_rate": round(u("lr", 0.01, 0.2), 5),
+                "depth": int(4 + (stable_hash_int(f"{exp_id}:depth") % 8)),
+                "iterations": int(200 + (stable_hash_int(f"{exp_id}:iters") % 800)),
+            }
+        elif "RandomForest" in strategy:
+            params = {
+                "n_estimators": int(100 + (stable_hash_int(f"{exp_id}:rf_n") % 900)),
+                "max_depth": int(3 + (stable_hash_int(f"{exp_id}:rf_d") % 20)),
+            }
+        else:
+            params = {
+                "alpha": round(u("alpha", 1e-4, 10.0), 6),
+                "feature_set": "basic",
+            }
+
+        return strategy, params
+
+    def _dry_run_fill_text(
+        self,
+        text: str,
+        key: str,
+        attempt: int,
+        fixed: Dict[str, str],
+        protect: set[str],
+    ) -> str:
+        """
+        Replace {{PLACEHOLDER}} tokens with deterministic values.
+
+        attempt=0 leaves a small subset of placeholders (excluding `protect`) so the resume path runs.
+        attempt>=1 fills all remaining placeholders.
+        """
+        placeholders = sorted(set(re.findall(r"\{\{([^{}]+)\}\}", text)))
+        if not placeholders:
+            return text
+
+        for ph in placeholders:
+            ph_key = ph.strip()
+            if ph_key in fixed:
+                text = text.replace(f"{{{{{ph}}}}}", str(fixed[ph_key]))
+                continue
+
+            # Leave some placeholders on the first pass (deterministically) to exercise resume fill.
+            if attempt == 0 and ph_key not in protect:
+                # Keep ~15% as unresolved.
+                if stable_hash_int(f"{key}:{ph_key}") % 20 == 0:
+                    continue
+
+            # Generic default replacement
+            replacement = f"DRY_RUN_{ph_key}"
+            text = text.replace(f"{{{{{ph}}}}}", replacement)
+
+        return text
 
     def _build_kse_prompt(self,
                           competition_info: CompetitionInfo,
@@ -534,17 +691,38 @@ class KnowledgeStrategyEngine(BaseComponent):
                 "Placeholders to fill:\n" + "\n".join(missing_lines)
             )
 
-            execute_codex(
-                mode=CodexMode.KSE,
-                prompt_content=resume_prompt,
-                output_dir=str(iteration_dir),
-                iteration=iteration,
-                codex_responses_dir=codex_responses_dir,
-                timeout=self.codex_timeout,
-                logger=self.logger,
-                resume_prompt=resume_prompt,
-                run_label=f"resume{attempt+1}"
-            )
+            if self.simulation_mode:
+                # Dry-run: fill remaining placeholders locally and emit a Codex-like JSONL trace.
+                # attempt+1 corresponds to "resume1", "resume2", ...
+                run_label = f"resume{attempt+1}"
+                for path in template_paths:
+                    content = Path(path).read_text(encoding="utf-8")
+                    content = self._dry_run_fill_text(
+                        text=content,
+                        key=f"{iteration}:{path}:{run_label}",
+                        attempt=attempt + 1,
+                        fixed={},
+                        protect=set(),
+                    )
+                    Path(path).write_text(content, encoding="utf-8")
+
+                if codex_responses_dir:
+                    write_jsonl_agent_message(
+                        Path(codex_responses_dir) / "KSE" / f"response-{iteration}-{run_label}.jsonl",
+                        f"DRY-RUN: simulated KSE resume fill (iteration={iteration}, attempt={attempt+1}).\n\n{resume_prompt}"
+                    )
+            else:
+                execute_codex(
+                    mode=CodexMode.KSE,
+                    prompt_content=resume_prompt,
+                    output_dir=str(iteration_dir),
+                    iteration=iteration,
+                    codex_responses_dir=codex_responses_dir,
+                    timeout=self.codex_timeout,
+                    logger=self.logger,
+                    resume_prompt=resume_prompt,
+                    run_label=f"resume{attempt+1}"
+                )
 
             remaining = self._find_remaining_placeholders(template_paths)
             attempt += 1
