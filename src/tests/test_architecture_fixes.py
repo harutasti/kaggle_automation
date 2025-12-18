@@ -159,25 +159,26 @@ def test_mcdu_operation_reordering():
     with open(mcdu_path, 'r') as f:
         mcdu_content = f.read()
 
-    has_pending_cleanup = "self.pending_cleanup" in mcdu_content
-    has_delayed_cleanup = "Store worktree for later cleanup" in mcdu_content
     has_find_submission = "_find_submission_file" in mcdu_content
     has_official_scores = "official_scores" in mcdu_content
-    has_cleanup_after_pa = "Cleanup worktrees (after PA" in mcdu_content
+    # Evolution mode cleanup is driven by PA's TERMINATE decisions via archive_worktree().
+    has_archive_worktree = "archive_worktree" in mcdu_content
+    has_remove_persistent = "keys_to_remove" in mcdu_content and "self.persistent_experiments.pop" in mcdu_content
+    has_no_cleanup_note = "No worktree cleanup in evolution mode" in mcdu_content
 
     print(f"mcdu.py operation ordering:")
-    print(f"   {'✅' if has_pending_cleanup else '❌'} Uses pending_cleanup dict")
-    print(f"   {'✅' if has_delayed_cleanup else '❌'} Delays worktree cleanup")
     print(f"   {'✅' if has_find_submission else '❌'} Has _find_submission_file helper")
     print(f"   {'✅' if has_official_scores else '❌'} Passes official_scores to PA")
-    print(f"   {'✅' if has_cleanup_after_pa else '❌'} Cleanup happens after PA")
+    print(f"   {'✅' if has_archive_worktree else '❌'} Archives terminated worktrees")
+    print(f"   {'✅' if has_remove_persistent else '❌'} Removes terminated worktrees from persistent tracking")
+    print(f"   {'✅' if has_no_cleanup_note else '❌'} Explicitly notes no cleanup in evolution mode")
     print()
 
-    assert has_pending_cleanup, "pending_cleanup not found"
-    assert has_delayed_cleanup, "Delayed cleanup comment not found"
     assert has_find_submission, "_find_submission_file not found"
     assert has_official_scores, "official_scores not found"
-    assert has_cleanup_after_pa, "Cleanup after PA not found"
+    assert has_archive_worktree, "archive_worktree call not found"
+    assert has_remove_persistent, "persistent_experiments removal logic not found"
+    assert has_no_cleanup_note, "No-cleanup note not found"
 
 
 def test_mcdu_submission_flow():
@@ -193,7 +194,7 @@ def test_mcdu_submission_flow():
 
     # Check order: submission code appears before PA analysis
     submission_pos = mcdu_content.find("Submit successful experiments to Kaggle")
-    pa_analysis_pos = mcdu_content.find("Performance analysis (with official scores)")
+    pa_analysis_pos = mcdu_content.find("Performance analysis with evolution decisions")
 
     has_submission_section = submission_pos != -1
     has_pa_section = pa_analysis_pos != -1

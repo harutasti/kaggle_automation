@@ -12,6 +12,7 @@ Run this before full integration to verify Codex is working correctly.
 
 import json
 import logging
+import shutil
 import sys
 import tempfile
 from pathlib import Path
@@ -152,8 +153,11 @@ def main():
         print("=" * 60)
 
         # Clean up previous results
-        for file in worktree_path.glob("*"):
-            file.unlink()
+        for path in worktree_path.glob("*"):
+            if path.is_dir():
+                shutil.rmtree(path)
+            else:
+                path.unlink()
 
         result2 = execute_with_retry(
             task_markdown_path=task_path,

@@ -59,14 +59,16 @@ class GPUAllocator:
         Extract WAA index from experiment ID.
 
         Args:
-            exp_id: Experiment ID in format "iter{N}_exp{M}_{uuid}"
-                    e.g., "iter0_exp2_abc123" -> returns 2
+            exp_id: Experiment ID in format:
+                - "iter{N}_exp{M}_{suffix}"
+                - "iter{N}_exp{M}_cont_{suffix}" (continuations)
+              e.g., "iter0_exp2_abc123" -> returns 1 (0-based)
 
         Returns:
             0-based WAA index extracted from exp{M} part.
             Returns 0 if parsing fails.
         """
-        match = re.match(r'iter\d+_exp(\d+)_', exp_id)
+        match = re.search(r'_exp(\d+)_', exp_id)
         if match:
             # exp_id uses 1-based indexing (exp1, exp2, ...), convert to 0-based
             return int(match.group(1)) - 1
@@ -120,6 +122,19 @@ class GPUAllocator:
         Returns:
             GPUAllocation with env vars and prompt instructions
         """
+        if total_waas <= 0:
+            return self._cpu_only_allocation(0, reason="Invalid total_waas (<=0)")
+
+        if waa_index < 0:
+            logger.warning(f"Invalid waa_index={waa_index}; clamping to 0")
+            waa_index = 0
+        elif waa_index >= total_waas:
+            logger.warning(
+                f"waa_index={waa_index} out of range for total_waas={total_waas}; "
+                f"mapping to {waa_index % total_waas}"
+            )
+            waa_index = waa_index % total_waas
+
         if not self.enabled:
             return self._cpu_only_allocation(waa_index, reason="GPU allocation disabled")
 
@@ -473,24 +488,6 @@ for chunk in pd.read_csv('large_file.csv', chunksize=10000):
     process(chunk)
 ```
 """
-
-    @staticmethod
-    def parse_waa_index(experiment_id: str) -> int:
-        """
-        Extract WAA index from experiment_id.
-
-        Format: iter{N}_exp{M}_{uuid} -> returns M-1 (0-based)
-
-        Args:
-            experiment_id: e.g., "iter0_exp2_abc123"
-
-        Returns:
-            0-based WAA index (e.g., 1 for exp2)
-        """
-        match = re.match(r'iter\d+_exp(\d+)_', experiment_id)
-        if match:
-            return int(match.group(1)) - 1  # Convert to 0-based
-        return 0  # Default to first WAA if parsing fails
 
     def get_allocation_summary(self, total_waas: int) -> str:
         """

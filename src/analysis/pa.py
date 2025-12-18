@@ -13,7 +13,6 @@ from ..utils.pa_parser import (
     parse_pa_codex_output, extract_best_score_info, extract_improvement_trend,
     parse_evolution_decisions, validate_evolution_decisions, generate_decision_retry_prompt
 )
-from ..utils.prompt_filler import PromptFiller
 from ..utils.dry_run import stable_hash_int, write_jsonl_agent_message
 
 class PerformanceAnalyzer(BaseComponent):
@@ -32,7 +31,6 @@ class PerformanceAnalyzer(BaseComponent):
         self.simulation_mode = config.get("simulation_mode", False)
         self.use_codex = not self.simulation_mode
         self.max_iterations = config.get("max_iterations", 3)
-        self.prompt_filler = PromptFiller(config)
         self.competition_name = config.get("kaggle_competition_name", "unknown")
         self.evaluation_metric = config.get("evaluation_metric", "unknown")
 

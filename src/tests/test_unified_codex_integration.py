@@ -216,7 +216,7 @@ def test_pa_codex_integration():
         print("-" * 40)
 
         # Test prompt preparation
-        prompt = pa._prepare_pa_prompt(0, results, analysis)
+        prompt = pa._prepare_pa_prompt(0, results, analysis, official_scores={})
         if prompt:
             print(f"✅ PA prompt prepared successfully")
             print(f"   - Prompt length: {len(prompt)} characters")
@@ -292,7 +292,6 @@ def test_unified_executor():
             prompt_content="Generate 3 hypotheses",
             output_dir=str(test_dir),
             iteration=0,
-            num_hypotheses=3,
             dry_run=True
         )
         print(f"   ✅ KSE execution: success={kse_result.success}, mode={kse_result.mode.value}")

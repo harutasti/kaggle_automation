@@ -194,6 +194,25 @@ class KnowledgeStrategyEngine(BaseComponent):
             exp_ids.append(f"iter{iteration}_exp{i+1}_{uuid.uuid4().hex[:6]}")
         return exp_ids
 
+    def _build_experiment_ids_for_slots(self, iteration: int, slot_numbers: List[int]) -> List[str]:
+        """
+        Generate experiment identifiers for specific WAA slot numbers.
+
+        Slot numbers are 1-based (exp1, exp2, ...), matching the WAA/GPU allocator conventions.
+        """
+        return [f"iter{iteration}_exp{slot}_{uuid.uuid4().hex[:6]}" for slot in slot_numbers]
+
+    @staticmethod
+    def _extract_exp_slot_number(exp_id: str) -> Optional[int]:
+        """Extract 1-based exp slot number from an experiment identifier."""
+        match = re.search(r"_exp(\d+)_", exp_id)
+        if match:
+            try:
+                return int(match.group(1))
+            except ValueError:
+                return None
+        return None
+
     def _prepare_iteration_templates(self, iteration: int, exp_ids: List[str]) -> Dict[str, Any]:
         """
         Copy KSE templates into the iteration directory and pre-fill experiment IDs.
@@ -346,12 +365,19 @@ class KnowledgeStrategyEngine(BaseComponent):
                                        is_initial: bool = True,
                                        analysis_result: Optional[AnalysisResult] = None,
                                        previous_results: Optional[List[ExperimentResult]] = None,
-                                       official_scores: Optional[Dict[str, float]] = None) -> List[ExperimentHypothesis]:
+                                       official_scores: Optional[Dict[str, float]] = None,
+                                       exp_ids: Optional[List[str]] = None,
+                                       total_waas: Optional[int] = None) -> List[ExperimentHypothesis]:
         """Generate hypotheses using Codex with the new A/B template pipeline."""
         self.logger.info(f"Generating hypotheses using Codex for iteration {iteration}")
 
         # Prepare iteration workspace and template files
-        exp_ids = self._build_experiment_ids(iteration, num_hypotheses)
+        if exp_ids is None:
+            exp_ids = self._build_experiment_ids(iteration, num_hypotheses)
+        else:
+            num_hypotheses = len(exp_ids)
+        if total_waas is None:
+            total_waas = num_hypotheses
         template_info = self._prepare_iteration_templates(iteration, exp_ids)
         iteration_dir: Path = template_info["iteration_dir"]
 
@@ -418,7 +444,9 @@ class KnowledgeStrategyEngine(BaseComponent):
         if not codex_result.success:
             self.logger.warning(f"Codex execution failed: {codex_result.error}")
             self.logger.warning("Falling back to programmatic generation")
-            return self._generate_programmatic_hypotheses(iteration, num_hypotheses, competition_info, previous_results)
+            return self._generate_programmatic_hypotheses(
+                iteration, num_hypotheses, competition_info, previous_results, exp_ids=exp_ids, total_waas=total_waas
+            )
 
         # Check placeholders and optionally trigger resume to complete them
         placeholder_map = self._find_remaining_placeholders(
@@ -436,7 +464,9 @@ class KnowledgeStrategyEngine(BaseComponent):
         if placeholder_map:
             self.logger.warning(f"Placeholders remain after Codex runs: {placeholder_map}")
             self.logger.warning("Falling back to programmatic generation")
-            return self._generate_programmatic_hypotheses(iteration, num_hypotheses, competition_info, previous_results)
+            return self._generate_programmatic_hypotheses(
+                iteration, num_hypotheses, competition_info, previous_results, exp_ids=exp_ids, total_waas=total_waas
+            )
 
         # Build final hypotheses and WAA task markdowns from filled templates
         hypotheses = self._create_hypotheses_from_templates(
@@ -445,7 +475,7 @@ class KnowledgeStrategyEngine(BaseComponent):
             common_path=template_info["common_path"],
             experiment_paths=template_info["experiment_paths"],
             competition_info=competition_info,
-            total_waas=num_hypotheses
+            total_waas=total_waas
         )
 
         self.logger.info(f"Successfully prepared {len(hypotheses)} hypotheses from filled templates")
@@ -810,18 +840,27 @@ class KnowledgeStrategyEngine(BaseComponent):
                                           iteration: int,
                                           num_hypotheses: int,
                                           competition_info: CompetitionInfo,
-                                          previous_results: Optional[List[ExperimentResult]]) -> List[ExperimentHypothesis]:
+                                          previous_results: Optional[List[ExperimentResult]],
+                                          exp_ids: Optional[List[str]] = None,
+                                          total_waas: Optional[int] = None) -> List[ExperimentHypothesis]:
         """Fallback hypothesis generation without Codex."""
         iteration_dir = Path(self.hypothesis_dir) / f"iter{iteration}"
         iteration_dir.mkdir(parents=True, exist_ok=True)
         hypotheses = []
-        for i in range(num_hypotheses):
-            exp_id = f"iter{iteration}_exp{i+1}_{uuid.uuid4().hex[:6]}"
+
+        if exp_ids is None:
+            exp_ids = [f"iter{iteration}_exp{i+1}_{uuid.uuid4().hex[:6]}" for i in range(num_hypotheses)]
+        else:
+            num_hypotheses = len(exp_ids)
+        if total_waas is None:
+            total_waas = num_hypotheses
+
+        for exp_id in exp_ids:
             strategy = random.choice(self.strategies)
             params = self._get_dummy_params(strategy, previous_results)
             task_md_path = iteration_dir / f"{exp_id}_task.md"
 
-            task_markdown = self._generate_task_markdown(exp_id, iteration, strategy, params, competition_info, num_hypotheses)
+            task_markdown = self._generate_task_markdown(exp_id, iteration, strategy, params, competition_info, total_waas)
             write_markdown(task_markdown, str(task_md_path))
 
             hypothesis = ExperimentHypothesis(
@@ -1246,6 +1285,7 @@ Based on discussion analysis, here are relevant insights for this strategy:
         )
 
         # Create continuation hypotheses for CONTINUE decisions
+        occupied_slots: set[int] = set()
         for decision in continue_decisions:
             exp_id = decision.experiment_id
             worktree_path = persistent_experiments.get(exp_id)
@@ -1254,6 +1294,25 @@ Based on discussion analysis, here are relevant insights for this strategy:
                 self.logger.warning(f"No worktree found for {exp_id}, treating as TERMINATE")
                 terminate_decisions.append(decision)
                 continue
+
+            # Record the slot (expN) occupied by this continued worktree so that new hypotheses
+            # can be generated for the freed slots without colliding on GPU/WAA allocation.
+            worktree_id = os.path.basename(os.path.normpath(worktree_path))
+            slot_num = self._extract_exp_slot_number(worktree_id) or self._extract_exp_slot_number(exp_id)
+            if slot_num is None:
+                # As a last resort, try to infer from any key that maps to the same worktree.
+                for key, path in persistent_experiments.items():
+                    if path == worktree_path:
+                        slot_num = self._extract_exp_slot_number(key)
+                        if slot_num is not None:
+                            break
+            if slot_num is not None:
+                occupied_slots.add(slot_num)
+            else:
+                self.logger.warning(
+                    f"Could not infer exp slot number for continued experiment {exp_id} "
+                    f"(worktree={worktree_path}); GPU allocation may be degraded."
+                )
 
             # Find the previous result for this experiment
             prev_result = next((r for r in previous_results if r.experiment_id == exp_id), None)
@@ -1271,11 +1330,12 @@ Based on discussion analysis, here are relevant insights for this strategy:
             )
             continuation_hypotheses.append(continuation)
 
-        # Calculate how many new hypotheses we need
-        slots_for_new = num_hypotheses - len(continuation_hypotheses)
-        self.logger.info(f"Creating {slots_for_new} new hypotheses for freed slots")
+        # Determine which WAA slots are free this iteration.
+        all_slots = list(range(1, num_hypotheses + 1))
+        free_slots = [s for s in all_slots if s not in occupied_slots]
+        self.logger.info(f"Creating {len(free_slots)} new hypotheses for freed slots: {free_slots}")
 
-        if slots_for_new > 0:
+        if free_slots:
             # Generate new hypotheses for freed slots
             # Include context about what was terminated and why
             terminated_context = self._build_termination_context(terminate_decisions)
@@ -1283,11 +1343,12 @@ Based on discussion analysis, here are relevant insights for this strategy:
             new_hypotheses = self._generate_new_hypotheses_for_slots(
                 competition_info=competition_info,
                 current_iteration=current_iteration,
-                num_new=slots_for_new,
+                slot_numbers=free_slots,
                 analysis_result=analysis_result,
                 previous_results=previous_results,
                 official_scores=official_scores,
-                terminated_context=terminated_context
+                terminated_context=terminated_context,
+                total_waas=num_hypotheses
             )
 
         self._log_end(
@@ -1320,7 +1381,18 @@ Based on discussion analysis, here are relevant insights for this strategy:
             ContinuationHypothesis object
         """
         exp_id = decision.experiment_id
-        continuation_id = f"iter{iteration}_cont_{exp_id.split('_')[-1]}"
+        worktree_id = os.path.basename(os.path.normpath(worktree_path))
+        slot_num = self._extract_exp_slot_number(worktree_id) or self._extract_exp_slot_number(exp_id)
+        if slot_num is None:
+            self.logger.warning(
+                f"Could not infer exp slot number for continuation parent={exp_id} "
+                f"(worktree={worktree_path}); defaulting to exp1."
+            )
+            slot_num = 1
+
+        # Preserve the parent worktree suffix for stable lineage naming across iterations.
+        suffix = worktree_id.split("_")[-1] if worktree_id else exp_id.split("_")[-1]
+        continuation_id = f"iter{iteration}_exp{slot_num}_cont_{suffix}"
 
         # Generate continuation task markdown
         task_markdown = self._generate_continuation_task_markdown(
@@ -1482,35 +1554,42 @@ This is a **CONTINUATION** of experiment `{decision.experiment_id}`.
         self,
         competition_info: CompetitionInfo,
         current_iteration: int,
-        num_new: int,
+        slot_numbers: List[int],
         analysis_result: AnalysisResult,
         previous_results: List[ExperimentResult],
         official_scores: Optional[Dict[str, float]],
-        terminated_context: str
+        terminated_context: str,
+        total_waas: int
     ) -> List[ExperimentHypothesis]:
         """
         Generate new hypotheses for slots freed by TERMINATE decisions.
 
         Includes context about what was terminated to avoid repeating failures.
         """
-        self.logger.info(f"Generating {num_new} new hypotheses for freed slots")
+        self.logger.info(f"Generating {len(slot_numbers)} new hypotheses for freed slots: {slot_numbers}")
+
+        exp_ids = self._build_experiment_ids_for_slots(current_iteration, slot_numbers)
 
         if self.use_codex_for_generation:
             # Use Codex with termination context
             return self._generate_hypotheses_with_codex(
                 competition_info=competition_info,
-                num_hypotheses=num_new,
+                num_hypotheses=len(exp_ids),
                 iteration=current_iteration,
                 is_initial=False,
                 analysis_result=analysis_result,
                 previous_results=previous_results,
-                official_scores=official_scores
+                official_scores=official_scores,
+                exp_ids=exp_ids,
+                total_waas=total_waas
             )
         else:
             # Fallback to programmatic generation
             return self._generate_programmatic_hypotheses(
                 iteration=current_iteration,
-                num_hypotheses=num_new,
+                num_hypotheses=len(exp_ids),
                 competition_info=competition_info,
-                previous_results=previous_results
+                previous_results=previous_results,
+                exp_ids=exp_ids,
+                total_waas=total_waas
             )

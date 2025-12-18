@@ -5,6 +5,7 @@ import uuid
 import subprocess
 import multiprocessing
 import json
+import sys
 from typing import List, Dict, Tuple, Optional
 import git # GitPython
 
@@ -13,7 +14,6 @@ import datetime
 from ..core.base_component import BaseComponent
 from ..data_models import ExperimentHypothesis, ContinuationHypothesis
 from ..utils.file_utils import ensure_dir, remove_dir
-from .codex_launcher import CodexExperimentLauncher
 from .session_manager import SessionManager, SessionStatus
 from ..utils.resource_monitor import ResourceMonitor
 from ..utils.gpu_allocator import GPUAllocator
@@ -34,10 +34,8 @@ class ExperimentOrchestrator(BaseComponent):
         self.experiment_worktree_map: Dict[str, str] = {}
 
         # Execution mode derives from simulation_mode
-        self.codex_launcher = None
         if not self.simulation_mode:
             self.logger.info("Initializing Codex execution mode")
-            self.codex_launcher = CodexExperimentLauncher(config)
         else:
             self.logger.info("Using simulation execution mode")
 
@@ -52,6 +50,13 @@ class ExperimentOrchestrator(BaseComponent):
 
         # Track resume retry counts per experiment (for failed resume attempts)
         self._resume_retry_count: Dict[str, int] = {}
+
+        # Resolved uv command (absolute path if found); used for worktree env setup and dry-run execution.
+        self._uv_cmd: Optional[str] = None
+
+        # When a DONE/status COMPLETE marker appears but the process is still running,
+        # enforce a configurable grace period before terminating the process.
+        self._completion_grace_started_at: Dict[str, float] = {}
 
         # Initialize GPU allocator for parallel WAA resource management
         self.gpu_allocator = GPUAllocator(config)
@@ -95,58 +100,76 @@ class ExperimentOrchestrator(BaseComponent):
             self.logger.error(f"Error during stale worktree cleanup: {e}")
 
     def _ensure_uv_available(self):
-        """Ensure uv is installed; attempt npm-based install if missing (install npm first if needed)."""
-        if shutil.which("uv"):
+        """
+        Ensure `uv` is available.
+
+        This project relies on Astral's `uv` as the dependency manager for:
+        - Controller execution (recommended: `uv run python main.py`)
+        - Per-worktree environment setup (`uv sync`)
+
+        IMPORTANT: We deliberately avoid "helpful" system mutations here (apt/yum/brew/npm),
+        because they are risky and often incorrect in minimal/CI environments.
+        """
+        if self._uv_cmd and os.path.exists(self._uv_cmd):
             return
 
-        self.logger.warning("uv command not found. Attempting to install via npm.")
-        if not shutil.which("npm"):
-            self.logger.info("npm is not available. Attempting to install npm first.")
-            self._install_npm()
+        uv_path = shutil.which("uv")
+        if uv_path:
+            self._uv_cmd = uv_path
+            return
 
-        if not shutil.which("npm"):
-            raise RuntimeError("npm is unavailable; please install Node.js/npm to allow uv installation.")
+        # Common fallbacks when uv is installed but PATH isn't configured.
+        candidate_paths = [
+            os.path.abspath(os.path.join(os.getcwd(), ".venv", "bin", "uv")),
+            os.path.expanduser("~/.local/bin/uv"),
+        ]
+        for candidate in candidate_paths:
+            if os.path.exists(candidate) and os.access(candidate, os.X_OK):
+                self._uv_cmd = candidate
+                return
 
-        install_cmd = ["npm", "install", "-g", "uv"]
-        try:
-            result = subprocess.run(install_cmd, capture_output=True, text=True, check=False)
+        if self.config.get("auto_install_uv", False):
+            # Safer (still mutating) alternative: install into the current Python environment.
+            # This avoids system package managers and keeps the change scoped to Python tooling.
+            self.logger.warning("uv not found. auto_install_uv=true: attempting `python -m pip install --user uv`")
+            result = subprocess.run(
+                [sys.executable, "-m", "pip", "install", "--user", "uv"],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
             if result.returncode != 0:
-                self.logger.error(f"npm install -g uv failed: {result.stderr}")
-                raise RuntimeError("uv installation via npm failed.")
-        except Exception as e:
-            raise RuntimeError(f"Failed to install uv via npm: {e}") from e
+                raise RuntimeError(
+                    "Failed to auto-install uv via pip. "
+                    f"stdout_tail={result.stdout[-500:] if result.stdout else ''} "
+                    f"stderr_tail={result.stderr[-500:] if result.stderr else ''}"
+                )
 
-        if not shutil.which("uv"):
-            raise RuntimeError("uv installation attempted but uv is still unavailable. Please install uv manually.")
+            # Re-check after install.
+            uv_path = shutil.which("uv")
+            if uv_path:
+                self._uv_cmd = uv_path
+                return
+            for candidate in candidate_paths:
+                if os.path.exists(candidate) and os.access(candidate, os.X_OK):
+                    self._uv_cmd = candidate
+                    return
 
-        self.logger.info("uv installed successfully via npm.")
+        raise RuntimeError(
+            "uv command not found. Install Astral uv and ensure it's on PATH "
+            "(recommended: `curl -LsSf https://astral.sh/uv/install.sh | sh`). "
+            "Alternatively set config `auto_install_uv=true` to attempt a user-scoped pip install."
+        )
 
-    def _install_npm(self):
-        """Attempt to install npm using common package managers."""
-        installers = []
-        if shutil.which("apt-get"):
-            installers.append(["apt-get", "update"])
-            installers.append(["apt-get", "install", "-y", "npm"])
-        elif shutil.which("yum"):
-            installers.append(["yum", "install", "-y", "npm"])
-        elif shutil.which("brew"):
-            installers.append(["brew", "install", "npm"])
-        else:
-            self.logger.error("No supported package manager found to install npm.")
-            return
+    def _get_uv_cmd(self) -> str:
+        """Return the resolved `uv` command (absolute path if available)."""
+        self._ensure_uv_available()
+        if not self._uv_cmd:
+            # Defensive; should be set by _ensure_uv_available()
+            raise RuntimeError("uv command not resolved")
+        return self._uv_cmd
 
-        for cmd in installers:
-            try:
-                result = subprocess.run(cmd, capture_output=True, text=True, check=False)
-                if result.returncode != 0:
-                    self.logger.warning(f"Command {' '.join(cmd)} failed: {result.stderr}")
-                    # Continue attempting remaining commands
-                else:
-                    self.logger.info(f"Command {' '.join(cmd)} succeeded.")
-            except Exception as e:
-                self.logger.warning(f"Failed to run {' '.join(cmd)}: {e}")
-
-    def launch_experiments(self, hypotheses: List[ExperimentHypothesis]) -> Dict[str, any]:
+    def launch_experiments(self, hypotheses: List[ExperimentHypothesis], total_waas: Optional[int] = None) -> Dict[str, any]:
         """Launch WAA simulator or Codex processes in parallel for each hypothesis.
 
         Returns:
@@ -164,11 +187,13 @@ class ExperimentOrchestrator(BaseComponent):
         max_workers = min(len(hypotheses), multiprocessing.cpu_count() * 2)
         self.logger.info(f"Launching {len(hypotheses)} experiments with max {max_workers} parallel workers.")
 
-        # Calculate total WAAs for GPU allocation
-        total_waas = len(hypotheses)
+        # Total WAAs for GPU allocation should reflect the configured parallel slots (not just the
+        # number of hypotheses in this specific launch call). In evolution mode, new hypotheses
+        # may occupy higher-numbered exp slots even when only a subset of slots are being launched.
+        effective_total_waas = total_waas if total_waas is not None else len(hypotheses)
 
         # Log GPU allocation summary
-        self.logger.info(self.gpu_allocator.get_allocation_summary(total_waas))
+        self.logger.info(self.gpu_allocator.get_allocation_summary(effective_total_waas))
 
         use_codex_execution = not self.simulation_mode
         processes_to_start = []
@@ -255,7 +280,7 @@ class ExperimentOrchestrator(BaseComponent):
                     # Ensure per-worktree environment by ignoring parent virtualenv
                     uv_env.pop("VIRTUAL_ENV", None)
                     result = subprocess.run(
-                        ['uv', 'sync'],
+                        [self._get_uv_cmd(), 'sync'],
                         cwd=worktree_path,
                         capture_output=True,
                         text=True,
@@ -305,7 +330,7 @@ class ExperimentOrchestrator(BaseComponent):
 
                 # Calculate GPU allocation for this WAA
                 waa_index = GPUAllocator.parse_waa_index(exp_id)
-                gpu_allocation = self.gpu_allocator.allocate(waa_index, total_waas)
+                gpu_allocation = self.gpu_allocator.allocate(waa_index, effective_total_waas)
 
                 # Prepare environment with GPU settings
                 env = os.environ.copy()
@@ -323,20 +348,22 @@ class ExperimentOrchestrator(BaseComponent):
                 else:
                     # Simulation mode: use WAA simulator with GPU env vars
                     cmd = [
-                        'uv', 'run', 'python', 'src/execution/wca_simulator.py',
+                        self._get_uv_cmd(), 'run', 'python', 'src/execution/wca_simulator.py',
                         '--worktree-path', worktree_path,
                         '--task-markdown-path', hypothesis.task_markdown_path,
                         '--experiment-id', exp_id,
                         '--log-level', self.config.get("log_level", "INFO")
                     ]
-                    process = subprocess.Popen(
-                        cmd,
-                        stdout=subprocess.PIPE,
-                        stderr=subprocess.PIPE,
-                        text=True,
-                        env=env,
-                        cwd=worktree_path
-                    )
+                    log_path = os.path.join(worktree_path, f"process_output_{exp_id}.log")
+                    with open(log_path, "w", encoding="utf-8") as log_file:
+                        process = subprocess.Popen(
+                            cmd,
+                            stdout=log_file,
+                            stderr=subprocess.STDOUT,
+                            text=True,
+                            env=env,
+                            cwd=worktree_path
+                        )
 
                 if process:
                     processes_to_start.append((process, exp_id, worktree_path))
@@ -424,15 +451,20 @@ Please execute the experiment exactly as described above. Ensure you:
             if codex_config.get("skip_confirmation", True):
                 cmd.append('--skip-git-repo-check')
 
-            process = subprocess.Popen(
-                cmd,
-                stdin=subprocess.PIPE,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT,
-                cwd=worktree_path,
-                text=True,
-                env=env or os.environ
-            )
+            # Avoid deadlock: codex emits a chatty JSONL stream; writing to a PIPE without
+            # continuously draining it can fill the OS pipe buffer and stall the subprocess.
+            # Stream stdout directly to a file in the worktree instead.
+            jsonl_path = os.path.join(worktree_path, f"codex_output_{exp_id}.jsonl")
+            with open(jsonl_path, "w", encoding="utf-8") as jsonl_file:
+                process = subprocess.Popen(
+                    cmd,
+                    stdin=subprocess.PIPE,
+                    stdout=jsonl_file,
+                    stderr=subprocess.STDOUT,
+                    cwd=worktree_path,
+                    text=True,
+                    env=env or os.environ
+                )
 
             # Send stdin asynchronously (avoid blocking)
             if process.stdin:
@@ -484,18 +516,49 @@ Please execute the experiment exactly as described above. Ensure you:
                 if current_status.status == SessionStatus.COMPLETE:
                     # Only finalize after Codex process has actually exited
                     if process.poll() is None:
-                        self.logger.debug(f"Experiment {exp_id} marked COMPLETE but process still running; waiting.")
-                        still_active_processes[exp_id] = (process, worktree_path)
+                        grace_seconds = int(self.config.get("process_completion_grace_seconds", 120))
+                        started_at = self._completion_grace_started_at.get(exp_id)
+                        if started_at is None:
+                            self._completion_grace_started_at[exp_id] = time.time()
+                            self.logger.debug(
+                                f"Experiment {exp_id} marked COMPLETE but process still running; "
+                                f"starting grace timer ({grace_seconds}s)."
+                            )
+                            still_active_processes[exp_id] = (process, worktree_path)
+                        else:
+                            elapsed = time.time() - started_at
+                            if elapsed >= grace_seconds:
+                                self.logger.warning(
+                                    f"Experiment {exp_id} marked COMPLETE but process still running after "
+                                    f"{elapsed:.1f}s (grace={grace_seconds}s). Terminating process."
+                                )
+                                try:
+                                    process.terminate()
+                                    process.wait(timeout=10)
+                                except Exception:
+                                    try:
+                                        process.kill()
+                                    except Exception:
+                                        pass
+                                self._finalize_completed_experiment(exp_id, process, worktree_path)
+                                completed_ids.append(exp_id)
+                                self._completion_grace_started_at.pop(exp_id, None)
+                            else:
+                                still_active_processes[exp_id] = (process, worktree_path)
                     else:
                         self._finalize_completed_experiment(exp_id, process, worktree_path)
                         completed_ids.append(exp_id)
+                        self._completion_grace_started_at.pop(exp_id, None)
                     continue
                 elif current_status.status == SessionStatus.ERROR:
                     # Error state, mark failed and collect what we can
                     self._handle_error_experiment(exp_id, process, worktree_path, current_status)
                     completed_ids.append(exp_id)
+                    self._completion_grace_started_at.pop(exp_id, None)
                     continue
                 elif current_status.status == SessionStatus.RUNNING:
+                    # Clear any stale completion grace tracking if the experiment reports RUNNING.
+                    self._completion_grace_started_at.pop(exp_id, None)
                     # Process exited with RUNNING status - check if training is complete
                     if process.poll() is not None:
                         # Codex session exited, training may still be running in background
@@ -512,17 +575,47 @@ Please execute the experiment exactly as described above. Ensure you:
             # 3. Fallback: check DONE file (backward compatibility)
             if os.path.exists(done_file_path):
                 if process.poll() is None:
-                    self.logger.debug(f"DONE file present for {exp_id} but process still running; waiting.")
-                    still_active_processes[exp_id] = (process, worktree_path)
+                    grace_seconds = int(self.config.get("process_completion_grace_seconds", 120))
+                    started_at = self._completion_grace_started_at.get(exp_id)
+                    if started_at is None:
+                        self._completion_grace_started_at[exp_id] = time.time()
+                        self.logger.debug(
+                            f"DONE file present for {exp_id} but process still running; "
+                            f"starting grace timer ({grace_seconds}s)."
+                        )
+                        still_active_processes[exp_id] = (process, worktree_path)
+                    else:
+                        elapsed = time.time() - started_at
+                        if elapsed >= grace_seconds:
+                            self.logger.warning(
+                                f"DONE file present for {exp_id} but process still running after "
+                                f"{elapsed:.1f}s (grace={grace_seconds}s). Terminating process."
+                            )
+                            try:
+                                process.terminate()
+                                process.wait(timeout=10)
+                            except Exception:
+                                try:
+                                    process.kill()
+                                except Exception:
+                                    pass
+                            self._finalize_completed_experiment(exp_id, process, worktree_path)
+                            completed_ids.append(exp_id)
+                            self._completion_grace_started_at.pop(exp_id, None)
+                        else:
+                            still_active_processes[exp_id] = (process, worktree_path)
                 else:
                     self._finalize_completed_experiment(exp_id, process, worktree_path)
                     completed_ids.append(exp_id)
+                    self._completion_grace_started_at.pop(exp_id, None)
             elif process.poll() is not None:
                 # Process exited without DONE or status file
                 self._handle_unexpected_exit(exp_id, process, worktree_path)
                 completed_ids.append(exp_id)
+                self._completion_grace_started_at.pop(exp_id, None)
             else:
                 still_active_processes[exp_id] = (process, worktree_path)
+                self._completion_grace_started_at.pop(exp_id, None)
 
         # 4. Handle sessions needing resume
         # Note: execute_codex_resume() is BLOCKING - it waits for the resumed session to complete
@@ -659,7 +752,7 @@ Please execute the experiment exactly as described above. Ensure you:
                     pass
 
             cmd = [
-                "uv", "run", "python", "src/execution/wca_simulator.py",
+                self._get_uv_cmd(), "run", "python", "src/execution/wca_simulator.py",
                 "--worktree-path", worktree_path,
                 "--task-markdown-path", task_path,
                 "--experiment-id", exp_id,
@@ -745,11 +838,15 @@ Please execute the experiment exactly as described above. Ensure you:
             return  # Only for Codex mode
 
         try:
-            # Read stdout from the process (contains JSONL output)
+            jsonl_path = os.path.join(worktree_path, f"codex_output_{exp_id}.jsonl")
+            # Newer launch path streams Codex JSONL directly to this file to avoid pipe deadlocks.
+            if os.path.exists(jsonl_path):
+                return
+
+            # Backward-compatible fallback: if stdout was piped, drain it now.
             if process.stdout:
                 jsonl_output = process.stdout.read()
                 if jsonl_output:
-                    jsonl_path = os.path.join(worktree_path, f"codex_output_{exp_id}.jsonl")
                     with open(jsonl_path, 'w', encoding='utf-8') as f:
                         f.write(jsonl_output)
                     self.logger.info(f"Saved JSONL output to {jsonl_path}")
@@ -959,15 +1056,18 @@ Please execute the continuation experiment exactly as described above. Ensure yo
             if codex_config.get("skip_confirmation", True):
                 cmd.append('--skip-git-repo-check')
 
-            process = subprocess.Popen(
-                cmd,
-                stdin=subprocess.PIPE,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT,
-                cwd=worktree_path,
-                text=True,
-                env=env
-            )
+            # Avoid deadlock on chatty JSONL: stream Codex stdout to a file instead of a PIPE.
+            jsonl_path = os.path.join(worktree_path, f"codex_output_{cont_id}.jsonl")
+            with open(jsonl_path, "w", encoding="utf-8") as jsonl_file:
+                process = subprocess.Popen(
+                    cmd,
+                    stdin=subprocess.PIPE,
+                    stdout=jsonl_file,
+                    stderr=subprocess.STDOUT,
+                    cwd=worktree_path,
+                    text=True,
+                    env=env
+                )
 
             # Send stdin asynchronously (avoid blocking)
             if process.stdin:
@@ -993,19 +1093,21 @@ Please execute the continuation experiment exactly as described above. Ensure yo
     ) -> Optional[subprocess.Popen]:
         """Launch simulation process for a continuation experiment."""
         try:
-            process = subprocess.Popen(
-                [
-                    'uv', 'run', 'python', 'src/execution/wca_simulator.py',
-                    '--worktree-path', worktree_path,
-                    '--task-markdown-path', task_path,
-                    '--experiment-id', exp_id,
-                    '--log-level', self.config.get("log_level", "INFO"),
-                ],
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                cwd=worktree_path,
-                env=env or os.environ.copy()
-            )
+            log_path = os.path.join(worktree_path, f"process_output_{exp_id}.log")
+            with open(log_path, "w", encoding="utf-8") as log_file:
+                process = subprocess.Popen(
+                    [
+                        self._get_uv_cmd(), 'run', 'python', 'src/execution/wca_simulator.py',
+                        '--worktree-path', worktree_path,
+                        '--task-markdown-path', task_path,
+                        '--experiment-id', exp_id,
+                        '--log-level', self.config.get("log_level", "INFO"),
+                    ],
+                    stdout=log_file,
+                    stderr=subprocess.STDOUT,
+                    cwd=worktree_path,
+                    env=env or os.environ.copy()
+                )
             return process
         except Exception as e:
             self.logger.error(f"Failed to launch simulation for {exp_id}: {e}")

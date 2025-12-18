@@ -266,7 +266,12 @@ class MasterControllerDecisionUnit(BaseComponent):
 
             # ================== Common: Wait for completion ==================
             # 2d. Wait for completion & collect results
-            poll_interval_seconds = 1 if self.config.get("simulation_mode", False) else 10
+            if self.config.get("simulation_mode", False):
+                poll_interval_seconds = 1
+            else:
+                # Keep this configurable since EO's resource monitor is driven by this poll loop.
+                poll_interval_seconds = int(self.config.get("resource_monitor_interval_seconds", 10))
+                poll_interval_seconds = max(1, poll_interval_seconds)
             while running_experiments:
                 time.sleep(poll_interval_seconds)
                 completed_ids = self.eo.check_running_experiments()
@@ -638,7 +643,7 @@ class MasterControllerDecisionUnit(BaseComponent):
 
         # Launch new hypotheses (create fresh worktrees)
         if new_hypotheses:
-            new_result = self.eo.launch_experiments(new_hypotheses)
+            new_result = self.eo.launch_experiments(new_hypotheses, total_waas=total_waas)
             all_launched.extend(new_result.get('launched', []))
             all_failed.extend(new_result.get('failed', []))
 

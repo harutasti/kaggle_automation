@@ -3,7 +3,8 @@
 Test the uv integration for AutoKaggle:
 - experiment_pyproject.toml exists
 - config.json has experiment_pyproject_path
-- KSE injects uv requirements into task markdown
+- WAA task template enforces strict uv usage
+- KSE-generated task markdown includes uv rules (via template)
 - EO copies pyproject.toml and runs uv sync
 """
 
@@ -77,61 +78,87 @@ def test_config_has_pyproject_path():
 
 
 def test_kse_has_uv_requirements_method():
-    """Test that KSE has _get_uv_requirements_section method."""
+    """Test that the WAA task template enforces strict uv usage rules."""
     print("=" * 80)
-    print("TEST 3: KSE Has UV Requirements Method")
+    print("TEST 3: WAA Template Has UV Requirements")
     print("=" * 80)
     print()
 
-    kse_path = Path(project_root) / "src" / "core" / "kse.py"
-    with open(kse_path, 'r') as f:
-        kse_content = f.read()
+    template_path = Path(project_root) / "prompts" / "WAA" / "waa_task_template.md"
+    with open(template_path, 'r', encoding="utf-8") as f:
+        content = f.read()
 
-    has_method = "def _get_uv_requirements_section" in kse_content
-    has_uv_add = "uv add" in kse_content
-    has_uv_run = "uv run" in kse_content
-    has_critical = "CRITICAL" in kse_content
-    has_violation = "VIOLATION" in kse_content
+    has_uv_add = "uv add" in content
+    has_uv_run = "uv run" in content
+    has_never_pip = "NEVER use `pip install`" in content or "NEVER use pip" in content
+    has_critical = "CRITICAL" in content
+    has_violation = "VIOLATION" in content
 
-    print(f"kse.py:")
-    print(f"   {'✅' if has_method else '❌'} _get_uv_requirements_section method defined")
+    print(f"waa_task_template.md:")
     print(f"   {'✅' if has_uv_add else '❌'} Contains 'uv add' instruction")
     print(f"   {'✅' if has_uv_run else '❌'} Contains 'uv run' instruction")
+    print(f"   {'✅' if has_never_pip else '❌'} Prohibits pip installs")
     print(f"   {'✅' if has_critical else '❌'} Contains CRITICAL warning")
     print(f"   {'✅' if has_violation else '❌'} Contains VIOLATION warning")
     print()
 
-    assert has_method, "_get_uv_requirements_section method not found"
     assert has_uv_add, "'uv add' instruction not found"
     assert has_uv_run, "'uv run' instruction not found"
+    assert has_never_pip, "pip prohibition not found"
     assert has_critical, "CRITICAL warning not found"
     assert has_violation, "VIOLATION warning not found"
 
 
 def test_kse_injects_uv_requirements():
-    """Test that KSE injects uv requirements into task markdown."""
+    """Test that KSE-generated task markdown includes uv requirements (via template)."""
     print("=" * 80)
     print("TEST 4: KSE Injects UV Requirements")
     print("=" * 80)
     print()
 
-    kse_path = Path(project_root) / "src" / "core" / "kse.py"
-    with open(kse_path, 'r') as f:
-        kse_content = f.read()
+    import tempfile
+    from src.core.kse import KnowledgeStrategyEngine
+    from src.data_models import CompetitionInfo
 
-    # Check that both task markdown methods inject uv requirements
-    method1_injection = "uv_requirements = self._get_uv_requirements_section()" in kse_content
-    method1_prepend = 'return uv_requirements + "\\n\\n" + task_md' in kse_content
-    method2_prepend = 'return uv_requirements + "\\n\\n" + markdown.strip()' in kse_content
+    with tempfile.TemporaryDirectory() as tmp:
+        kse = KnowledgeStrategyEngine(
+            {
+                "experiment_run_dir": tmp,
+                "simulation_mode": True,
+                "prompts_dir": str(Path(project_root) / "prompts"),
+                "wca_per_iteration": 3,
+            }
+        )
+        comp = CompetitionInfo(
+            name="titanic",
+            evaluation_metric="accuracy",
+            deadline=None,
+            description_markdown="",
+            data_files=[],
+            higher_is_better=True,
+        )
+        markdown = kse._generate_task_markdown(
+            exp_id="iter0_exp1_test",
+            iteration=0,
+            strategy="SimpleGBM",
+            params={},
+            comp_info=comp,
+            total_waas=3,
+        )
+
+    has_uv_add = "uv add" in markdown
+    has_uv_run = "uv run" in markdown
+    has_violation = "VIOLATION" in markdown
 
     print(f"kse.py task markdown generation:")
-    print(f"   {'✅' if method1_injection else '❌'} Gets uv_requirements_section")
-    print(f"   {'✅' if method1_prepend else '❌'} Injects into _generate_task_markdown_from_hypothesis")
-    print(f"   {'✅' if method2_prepend else '❌'} Injects into _generate_task_markdown")
+    print(f"   {'✅' if has_uv_add else '❌'} Contains 'uv add' rule")
+    print(f"   {'✅' if has_uv_run else '❌'} Contains 'uv run' rule")
+    print(f"   {'✅' if has_violation else '❌'} Contains violation warning")
     print()
 
-    assert method1_injection, "uv_requirements_section not called"
-    assert method1_prepend or method2_prepend, "uv requirements not prepended to markdown"
+    assert has_uv_add, "'uv add' rule missing from task markdown"
+    assert has_uv_run, "'uv run' rule missing from task markdown"
+    assert has_violation, "Violation warning missing from task markdown"
 
 
 def test_eo_copies_pyproject():
@@ -196,11 +223,12 @@ def test_eo_runs_uv_sync():
     with open(eo_path, 'r') as f:
         eo_content = f.read()
 
-    has_uv_sync = "'uv', 'sync'" in eo_content
+    has_uv_sync = "self._get_uv_cmd(), 'sync'" in eo_content or "self._get_uv_cmd(), \"sync\"" in eo_content
     has_subprocess_run = 'subprocess.run' in eo_content
     has_timeout = 'timeout=300' in eo_content
     has_error_handling = 'subprocess.TimeoutExpired' in eo_content
     has_file_not_found = 'FileNotFoundError' in eo_content
+    no_npm_install = "npm install -g uv" not in eo_content
 
     print(f"eo.py uv sync execution:")
     print(f"   {'✅' if has_uv_sync else '❌'} Runs 'uv sync' command")
@@ -208,6 +236,7 @@ def test_eo_runs_uv_sync():
     print(f"   {'✅' if has_timeout else '❌'} Has 5 minute timeout")
     print(f"   {'✅' if has_error_handling else '❌'} Handles TimeoutExpired")
     print(f"   {'✅' if has_file_not_found else '❌'} Handles FileNotFoundError (uv not installed)")
+    print(f"   {'✅' if no_npm_install else '❌'} Does not attempt npm install")
     print()
 
     assert has_uv_sync, "'uv sync' command not found"
@@ -215,6 +244,7 @@ def test_eo_runs_uv_sync():
     assert has_timeout, "timeout not set"
     assert has_error_handling, "TimeoutExpired not handled"
     assert has_file_not_found, "FileNotFoundError not handled"
+    assert no_npm_install, "EO should not attempt to install uv via npm"
 
 
 def run_all_tests():
