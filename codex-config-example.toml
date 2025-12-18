@@ -1,0 +1,14 @@
+sandbox_mode = "danger-full-access"
+model_reasoning_effort = "high"
+model_reasoning_summary = "auto"
+model = "gpt-5.2"
+
+[features]
+web_search_request = true     # Enable the web search tool
+view_image_tool = true        # Optional: allow the model to read local images
+apply_patch_freeform = true   # Optional: enable apply_patch tool
+
+[notice]
+hide_full_access_warning = true
+hide_gpt5_1_migration_prompt = true
+"hide_gpt-5.1-codex-max_migration_prompt" = true
