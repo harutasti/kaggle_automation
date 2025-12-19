@@ -950,6 +950,24 @@ Please execute the experiment exactly as described above. Ensure you:
                 with open(metadata_path, 'w') as f:
                     json.dump(metadata, f, indent=2)
 
+                # Save hypothesis-style metadata for the continuation so RAD can preserve strategy info.
+                # RAD currently looks for hypothesis_{exp_id}.json in the worktree as a fallback.
+                try:
+                    hypothesis_metadata = {
+                        "experiment_id": cont_id,
+                        "iteration": continuation.iteration,
+                        "strategy_name": continuation.original_strategy_name,
+                        "parameters": continuation.new_parameters,
+                        "task_markdown_path": task_dst,
+                        "parent_experiment_id": exp_id,
+                    }
+                    hypothesis_path = os.path.join(worktree_path, f"hypothesis_{cont_id}.json")
+                    with open(hypothesis_path, "w", encoding="utf-8") as f:
+                        json.dump(hypothesis_metadata, f, indent=2)
+                    self.logger.debug(f"Saved continuation hypothesis metadata to {hypothesis_path}")
+                except Exception as e:
+                    self.logger.warning(f"Failed to save continuation hypothesis metadata: {e}")
+
                 # Launch experiment using Codex or simulator
                 if self.simulation_mode:
                     # Simulation mode (still exercise GPU allocation env vars)

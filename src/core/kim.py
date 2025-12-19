@@ -42,6 +42,7 @@ class KaggleInterfaceManager(BaseComponent):
         self.dataset_analysis = None  # Will store dataset analysis results
         self._dataset_analyzer = None  # Will store DatasetAnalyzer instance for placeholder generation
         self.analyze_dataset = config.get("analyze_dataset", True)  # Enable dataset analysis by default
+        self.last_submission_ref: Optional[int] = None  # For fetching official score after submit
 
     def _authenticate_kaggle(self):
         """Authenticate with the Kaggle API."""
@@ -408,6 +409,17 @@ class KaggleInterfaceManager(BaseComponent):
                 return False
             
             self.logger.info(f"Submission successful. Result: {result}")
+            try:
+                submission_ref = None
+                if isinstance(result, dict):
+                    submission_ref = result.get("ref")
+                else:
+                    submission_ref = getattr(result, "ref", None)
+                if submission_ref is not None:
+                    self.last_submission_ref = int(submission_ref)
+                    self.logger.debug(f"Stored last submission ref: {self.last_submission_ref}")
+            except Exception as e:
+                self.logger.debug(f"Could not extract submission ref from submit result: {e}")
             self._log_end(method_name, result=True)
             return True
 
@@ -438,7 +450,11 @@ class KaggleInterfaceManager(BaseComponent):
             self._log_error(method_name, e)
             return False
 
-    def get_submission_score(self, wait_timeout: int = 300) -> Optional[Dict[str, Any]]:
+    def get_submission_score(
+        self,
+        wait_timeout: int = 300,
+        submission_ref: Optional[int] = None,
+    ) -> Optional[Dict[str, Any]]:
         """
         Get the most recent submission score from Kaggle.
 
@@ -447,6 +463,8 @@ class KaggleInterfaceManager(BaseComponent):
 
         Args:
             wait_timeout: Maximum seconds to wait for score (default: 5 minutes)
+            submission_ref: Optional submission ref returned by submit API; if provided,
+                polls for that submission specifically to avoid races with other submissions.
 
         Returns:
             Dict with submission details including score, or None if unavailable
@@ -467,30 +485,72 @@ class KaggleInterfaceManager(BaseComponent):
         try:
             import time
             start = time.time()
+            target_ref = submission_ref or self.last_submission_ref
 
             while time.time() - start < wait_timeout:
                 try:
                     submissions = self.api.competition_submissions(self.competition_name)
 
                     if submissions:
-                        latest = submissions[0]
+                        target = None
+                        if target_ref is not None:
+                            for submission in submissions:
+                                ref_val = None
+                                if isinstance(submission, dict):
+                                    ref_val = submission.get("ref") or submission.get("id")
+                                else:
+                                    ref_val = getattr(submission, "ref", None) or getattr(submission, "id", None)
+                                if ref_val is not None and int(ref_val) == int(target_ref):
+                                    target = submission
+                                    break
+
+                        if target_ref is not None and target is None:
+                            # Avoid accidentally returning a different submission's score.
+                            self.logger.debug(
+                                f"Submission ref {target_ref} not found in latest submissions page yet; waiting..."
+                            )
+                            time.sleep(10)
+                            continue
+
+                        latest = target or submissions[0]
+
+                        # Extract score across Kaggle API versions (camelCase vs snake_case).
+                        public_score_raw = None
+                        if isinstance(latest, dict):
+                            public_score_raw = (
+                                latest.get("publicScore")
+                                or latest.get("public_score")
+                                or latest.get("publicscore")
+                            )
+                        else:
+                            public_score_raw = (
+                                getattr(latest, "public_score", None)
+                                or getattr(latest, "publicScore", None)
+                            )
 
                         # Check if score is available
-                        if hasattr(latest, 'publicScore') and latest.publicScore:
+                        if public_score_raw is not None and str(public_score_raw).strip():
                             result = {
-                                "score": float(latest.publicScore),
+                                "score": float(public_score_raw),
                                 "status": "complete",
-                                "submission_id": getattr(latest, 'ref', None),
-                                "description": getattr(latest, 'description', None),
-                                "date": str(getattr(latest, 'date', None))
+                                "submission_id": (
+                                    latest.get("ref") if isinstance(latest, dict) else getattr(latest, "ref", None)
+                                ),
+                                "description": (
+                                    latest.get("description") if isinstance(latest, dict) else getattr(latest, "description", None)
+                                ),
+                                "date": str(latest.get("date") if isinstance(latest, dict) else getattr(latest, "date", None)),
                             }
                             self.logger.info(f"Got submission score: {result['score']}")
                             self._log_end(method_name, result=result)
                             return result
 
                         # Score not yet available
-                        status = getattr(latest, 'status', 'unknown')
-                        self.logger.debug(f"Submission status: {status}, waiting for score...")
+                        status = latest.get("status", "unknown") if isinstance(latest, dict) else getattr(latest, "status", "unknown")
+                        # Normalize enum-like statuses for logging
+                        status_str = getattr(status, "name", None) or str(status)
+                        self.logger.debug(f"Submission status: {status_str}, waiting for score...")
+                        # If we were polling a specific submission, it was found but score isn't ready yet.
 
                 except Exception as poll_error:
                     self.logger.warning(f"Error polling submissions: {poll_error}")
