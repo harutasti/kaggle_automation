@@ -23,6 +23,7 @@ from typing import Optional, List, Dict, Any, Literal
 from enum import Enum
 import uuid
 
+from .codex_jsonl import write_codex_messages_file
 
 class CodexMode(Enum):
     """Types of Codex executions"""
@@ -211,6 +212,7 @@ Please execute the experiment exactly as described above. Ensure you:
             jsonl_path.parent.mkdir(parents=True, exist_ok=True)
             jsonl_path.write_text(raw_output, encoding="utf-8")
             logger.info(f"Saved JSONL output to {jsonl_path}")
+            write_codex_messages_file(jsonl_path=jsonl_path)
 
         logger.info(f"Codex completed in {execution_time:.2f}s (exit code: {proc.returncode})")
 
@@ -625,6 +627,7 @@ def execute_kse_hypothesis_generation(
             jsonl_path.parent.mkdir(parents=True, exist_ok=True)
             jsonl_path.write_text(raw_output, encoding="utf-8")
             logger.info(f"Saved JSONL output to {jsonl_path}")
+            write_codex_messages_file(jsonl_path=jsonl_path)
 
         logger.info(f"KSE completed in {execution_time:.2f}s")
 
@@ -829,6 +832,7 @@ Create two output files:
             jsonl_path.parent.mkdir(parents=True, exist_ok=True)
             jsonl_path.write_text(raw_output, encoding="utf-8")
             logger.info(f"Saved JSONL output to {jsonl_path}")
+            write_codex_messages_file(jsonl_path=jsonl_path)
 
         logger.info(f"PA completed in {execution_time:.2f}s")
 
@@ -1140,6 +1144,7 @@ def execute_codex_resume(
         jsonl_path = codex_responses_dir / f"resume-{experiment_id}.jsonl"
         jsonl_path.write_text(raw_output, encoding="utf-8")
         logger.info(f"Saved resume JSONL output to {jsonl_path}")
+        write_codex_messages_file(jsonl_path=jsonl_path)
 
         # Check for completion indicators
         done_file = worktree_path / f"DONE_{experiment_id}"

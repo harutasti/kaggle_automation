@@ -58,6 +58,13 @@ def write_jsonl_agent_message(path: str | Path, text: str) -> None:
     ensure_dir(p.parent)
     event = {"type": "item.completed", "item": {"type": "agent_message", "text": text}}
     p.write_text(json.dumps(event) + "\n", encoding="utf-8")
+    try:
+        from .codex_jsonl import write_codex_messages_file
+
+        write_codex_messages_file(jsonl_path=p)
+    except Exception:
+        # Best-effort; dry-run should never fail due to auxiliary logging.
+        pass
 
 
 def first_match(patterns: Iterable[str], value: str) -> Optional[str]:
@@ -65,4 +72,3 @@ def first_match(patterns: Iterable[str], value: str) -> Optional[str]:
         if pat in value:
             return pat
     return None
-

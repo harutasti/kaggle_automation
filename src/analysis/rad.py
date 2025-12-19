@@ -8,6 +8,7 @@ from typing import List, Dict, Optional
 from ..core.base_component import BaseComponent
 from ..data_models import ExperimentResult, ExperimentHypothesis
 from ..utils.file_utils import ensure_dir, read_json, copy_file, move_file, write_json, read_markdown
+from ..utils.codex_jsonl import write_codex_messages_file
 
 class ResultAggregatorDatabase(BaseComponent):
     def __init__(self, config: dict):
@@ -227,6 +228,10 @@ class ResultAggregatorDatabase(BaseComponent):
             dst_path = os.path.join(codex_responses_waa_dir, jsonl_filename)
             copy_file(codex_output_jsonl, dst_path)
             self.logger.info(f"Copied JSONL output to {dst_path}")
+            try:
+                write_codex_messages_file(jsonl_path=dst_path)
+            except Exception as e:
+                self.logger.debug(f"Failed to write Codex messages file for {dst_path}: {e}")
 
         # Build ExperimentResult
         # Use hypothesis metadata if provided, otherwise use defaults
