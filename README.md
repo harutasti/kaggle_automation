@@ -99,6 +99,7 @@ Stop conditions live in config (`max_iterations`, `stop_condition.score_threshol
 - Python `>=3.12` (repo includes `.python-version`)
 - Git (required: this system uses Git worktrees)
 - `uv` (used both by the controller and by each experiment worktree)
+- `tmux` (**required**) — used to open a separate terminal window per Codex/WAA for live JSONL logs
 - Kaggle credentials (`kaggle.json`) for real competition data download (required even in `simulation_mode=true`; submissions only happen in real mode)
 - Codex CLI (`codex`) in PATH if `simulation_mode=false`
 - Playwright browsers if `use_crawler=true` (crawler uses `crawl4ai` + Playwright)
@@ -106,6 +107,23 @@ Stop conditions live in config (`max_iterations`, `stop_condition.score_threshol
 ---
 
 ## Setup
+
+### 0) Install system dependencies (tmux)
+
+`tmux` is an OS-level package (it is **not** installed via `pyproject.toml` / `uv sync`).
+
+Ubuntu/Debian:
+
+```bash
+sudo apt-get update
+sudo apt-get install -y tmux
+```
+
+macOS (Homebrew):
+
+```bash
+brew install tmux
+```
 
 ### 1) Install controller dependencies
 
@@ -129,7 +147,43 @@ If you use the crawler (`use_crawler=true`), install browsers:
 uv run python -m playwright install chromium
 ```
 
+You can also run a quick crawler health check:
+
+```bash
+uv run crawl4ai-doctor
+```
+
+### 4) Preflight checks (automatic)
+
+`main.py` runs a preflight step and will **exit early with a helpful message** if any required tool/credential is missing (e.g., `tmux`, `codex`, `kaggle.json`, Playwright/Chromium, `crawl4ai-doctor`).
+
 ---
+
+## Live Codex Logs (Separate tmux windows)
+
+AutoKaggle can stream each WAA’s `codex exec --json` output to a JSONL file and open a **separate tmux window per WAA** to render it live with colors.
+
+Requirements:
+- `tmux` installed
+- Run AutoKaggle *inside* tmux (so `$TMUX` is set), e.g. `tmux new -s autokaggle`
+
+Enable via config:
+
+```json
+{
+  "codex_live_view": {
+    "enabled": true,
+    "backend": "tmux",
+    "viewer_timestamps": true,
+    "viewer_idle_exit_seconds": 3.0
+  }
+}
+```
+
+Notes:
+- The main terminal stays clean: Codex JSONL output is written to `codex_output_<exp_id>.jsonl` in each worktree.
+- The tmux window auto-closes after Codex ends (or when the PID ends and the viewer is idle).
+- To disable: set `"enabled": false` or `"backend": "none"`.
 
 ## Configuration
 
@@ -144,6 +198,8 @@ Configs are JSON files in `config/`. The most important keys:
 - `simulation_mode`: if `true`, avoids **Codex calls only** and uses the simulator for WAAs; Kaggle API + crawler/data download still run (submissions are disabled)
 - `use_crawler`: whether to crawl Kaggle pages/discussions with Playwright
 - `experiment_pyproject_path`: per-experiment dependency spec copied into each worktree
+- `kaggle_score_wait_timeout_seconds`: how long to poll Kaggle for official scores after submissions
+- `kaggle_score_poll_interval_seconds`: polling interval for checking submission scores
 
 Example:
 

@@ -318,6 +318,7 @@ class MasterControllerDecisionUnit(BaseComponent):
                     [r.experiment_id for r in successful_results]
                 ):
                     self.logger.info(f"Submitting {len(successful_results)} successful experiments to Kaggle")
+                    submitted_refs: Dict[str, int] = {}
                     for result in successful_results:
                         submission_file = self._find_submission_file(result)
                         if submission_file:
@@ -325,17 +326,48 @@ class MasterControllerDecisionUnit(BaseComponent):
                                 submission_file,
                                 f"Iter {self.current_iteration} - {result.experiment_id}"
                             ):
-                                self.logger.info(f"Waiting for official score for {result.experiment_id}...")
-                                score_result = self.kim.get_submission_score(wait_timeout=120)
-                                if score_result and score_result.get("score"):
-                                    official_scores[result.experiment_id] = score_result["score"]
-                                    self.logger.info(f"Official score for {result.experiment_id}: {score_result['score']}")
+                                if self.kim.last_submission_ref is not None:
+                                    submitted_refs[result.experiment_id] = int(self.kim.last_submission_ref)
                                 else:
-                                    self.logger.warning(f"Could not get official score for {result.experiment_id}")
+                                    self.logger.warning(
+                                        f"Submission succeeded for {result.experiment_id} but no ref was captured; "
+                                        "skipping score polling for this submission."
+                                    )
                             else:
                                 self.logger.error(f"Failed to submit {result.experiment_id}")
                         else:
                             self.logger.warning(f"No submission file found for {result.experiment_id}")
+
+                    if submitted_refs:
+                        wait_timeout = int(self.config.get("kaggle_score_wait_timeout_seconds", 300))
+                        poll_interval = self.config.get("kaggle_score_poll_interval_seconds", 10)
+                        try:
+                            poll_interval = float(poll_interval)
+                        except Exception:
+                            poll_interval = 10.0
+                        if poll_interval <= 0:
+                            poll_interval = 10.0
+
+                        self.logger.info(
+                            f"Polling Kaggle for official scores (count={len(submitted_refs)}, "
+                            f"timeout={wait_timeout}s, interval={poll_interval}s)..."
+                        )
+
+                        start = time.time()
+                        pending: Dict[str, int] = dict(submitted_refs)
+                        while pending and (time.time() - start) < wait_timeout:
+                            for exp_id, ref in list(pending.items()):
+                                score_result = self.kim.get_submission_score_once(submission_ref=ref)
+                                if score_result and score_result.get("score") is not None:
+                                    official_scores[exp_id] = score_result["score"]
+                                    self.logger.info(f"Official score for {exp_id}: {score_result['score']}")
+                                    pending.pop(exp_id, None)
+
+                            if pending:
+                                time.sleep(poll_interval)
+
+                        for exp_id, ref in pending.items():
+                            self.logger.warning(f"Could not get official score for {exp_id} (ref={ref})")
                 else:
                     self.logger.info("User skipped Kaggle submissions for this iteration")
 

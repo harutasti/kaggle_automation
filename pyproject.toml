@@ -15,3 +15,7 @@ dependencies = [
     "rich>=14.2.0",
     "playwright>=1.56.0",
 ]
+
+# NOTE: tmux is an OS-level dependency and cannot be installed via `uv sync`.
+[tool.auto_kaggler]
+system_dependencies = ["tmux"]

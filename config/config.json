@@ -18,7 +18,16 @@
   "kse_codex_timeout": 3600,
   "pa_codex_timeout": 3600,
   "waa_resume_timeout": 3600,
+  "kaggle_score_wait_timeout_seconds": 300,
+  "kaggle_score_poll_interval_seconds": 10,
   "process_completion_grace_seconds": 120,
   "training_idle_threshold_minutes": 3,
-  "resource_monitor_interval_seconds": 30
+  "resource_monitor_interval_seconds": 30,
+  "codex_live_view": {
+    "enabled": true,
+    "backend": "tmux",
+    "title_prefix": "AutoKaggle",
+    "viewer_timestamps": true,
+    "viewer_idle_exit_seconds": 3.0
+  }
 }

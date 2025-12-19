@@ -104,6 +104,12 @@ def test_submission_score_polling_compat() -> bool:
             assert ok is True
             assert kim.last_submission_ref == 222
 
+            # Single-shot fetch should work (no waiting).
+            res0 = kim.get_submission_score_once()
+            assert res0 is not None
+            assert abs(res0["score"] - 0.22222) < 1e-9
+            assert res0["submission_id"] == 222
+
             # Poll using stored ref (no explicit submission_ref)
             res = kim.get_submission_score(wait_timeout=1)
             assert res is not None, "Expected score result, got None"
@@ -120,6 +126,9 @@ def test_submission_score_polling_compat() -> bool:
                 {"ref": 333, "publicScore": "0.33333", "status": "COMPLETE", "description": "d", "date": "2025-01-02"}
             ]
             kim.last_submission_ref = 333
+            res3_once = kim.get_submission_score_once()
+            assert res3_once is not None
+            assert abs(res3_once["score"] - 0.33333) < 1e-9
             res3 = kim.get_submission_score(wait_timeout=1)
             assert res3 is not None
             assert abs(res3["score"] - 0.33333) < 1e-9
@@ -209,4 +218,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-

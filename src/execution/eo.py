@@ -14,6 +14,7 @@ import datetime
 from ..core.base_component import BaseComponent
 from ..data_models import ExperimentHypothesis, ContinuationHypothesis
 from ..utils.file_utils import ensure_dir, remove_dir
+from ..utils.codex_live_view_launcher import CodexLiveViewLauncher
 from .session_manager import SessionManager, SessionStatus
 from ..utils.resource_monitor import ResourceMonitor
 from ..utils.gpu_allocator import GPUAllocator
@@ -62,8 +63,29 @@ class ExperimentOrchestrator(BaseComponent):
         self.gpu_allocator = GPUAllocator(config)
         self.logger.info(f"GPU allocator initialized")
 
+        # Optional: spawn a separate terminal per WAA to follow Codex JSONL output.
+        self._codex_live_view = CodexLiveViewLauncher(config, logger=self.logger)
+
         # Dry-run marker prefix used by src/execution/wca_simulator.py
         self._dry_run_training_done_prefix = "DRYRUN_TRAINING_DONE_"
+
+    def _maybe_spawn_live_view(self, *, label: str, jsonl_path: str, pid: int | None) -> None:
+        """
+        Spawn a separate terminal to follow a Codex JSONL output file, if enabled.
+
+        This is best-effort and must never break experiment execution.
+        """
+        try:
+            if not self._codex_live_view.enabled():
+                return
+
+            launched = self._codex_live_view.launch(label=label, jsonl_path=jsonl_path, pid=pid)
+            if not launched:
+                # Keep this at DEBUG to avoid spamming the main terminal; it remains actionable for users.
+                manual = self._codex_live_view.build_manual_command(label=label, jsonl_path=jsonl_path, pid=pid)
+                self.logger.debug(f"Live view not launched (label={label}). Manual command: {manual}")
+        except Exception as e:
+            self.logger.debug(f"Live view spawn failed (ignored): {e}")
 
     def _get_git_repo(self):
         """Return the Git repository for the current directory."""
@@ -470,6 +492,8 @@ Please execute the experiment exactly as described above. Ensure you:
             if process.stdin:
                 process.stdin.write(stdin_input)
                 process.stdin.close()
+
+            self._maybe_spawn_live_view(label=exp_id, jsonl_path=jsonl_path, pid=process.pid)
 
             self.logger.info(f"Launched Codex process for {exp_id} in {worktree_path}")
             return process
@@ -1091,6 +1115,8 @@ Please execute the continuation experiment exactly as described above. Ensure yo
             if process.stdin:
                 process.stdin.write(stdin_input)
                 process.stdin.close()
+
+            self._maybe_spawn_live_view(label=cont_id, jsonl_path=jsonl_path, pid=process.pid)
 
             self.logger.info(f"Launched Codex continuation process for {cont_id} in {worktree_path}")
             return process

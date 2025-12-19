@@ -2,6 +2,8 @@ import os
 import sys
 import json
 import argparse
+import shutil
+import subprocess
 from datetime import datetime
 
 project_root = os.path.dirname(os.path.abspath(__file__))
@@ -13,6 +15,162 @@ from src.utils.file_utils import ensure_dir
 from src.utils.system_specs import SystemSpecsDetector
 
 DEFAULT_CONFIG_FILE = "config/config.json"
+
+def _format_preflight_block(title: str, lines: list[str]) -> str:
+    header = f"{title}\n" + ("-" * len(title))
+    body = "\n".join(f"- {line}" for line in lines)
+    return f"{header}\n{body}"
+
+
+def _run_preflight_checks(config: dict, logger) -> None:
+    """
+    Fail fast on missing system tools / credentials that would otherwise fail mid-run.
+    """
+    errors: list[str] = []
+    warnings: list[str] = []
+
+    def require_cmd(cmd: str, *, why: str) -> None:
+        if shutil.which(cmd) is None:
+            errors.append(f"Missing command `{cmd}` ({why}).")
+
+    def optional_cmd(cmd: str, *, why: str) -> None:
+        if shutil.which(cmd) is None:
+            warnings.append(f"Missing command `{cmd}` ({why}).")
+
+    # tmux is required for separate-terminal live Codex viewing.
+    require_cmd("tmux", why="required to display live Codex logs in a separate terminal")
+
+    # Kaggle credentials (kaggle.json or env vars).
+    kaggle_user = os.environ.get("KAGGLE_USERNAME")
+    kaggle_key = os.environ.get("KAGGLE_KEY")
+    if kaggle_user and kaggle_key:
+        logger.info("Preflight: Kaggle credentials found in environment variables.")
+    else:
+        # Prefer project-root kaggle.json, then KAGGLE_CONFIG_DIR, then ~/.kaggle/kaggle.json.
+        candidates: list[str] = []
+        project_kaggle = os.path.join(project_root, "kaggle.json")
+        candidates.append(project_kaggle)
+        kaggle_config_dir = os.environ.get("KAGGLE_CONFIG_DIR")
+        if kaggle_config_dir:
+            candidates.append(os.path.join(kaggle_config_dir, "kaggle.json"))
+        home = os.path.expanduser("~")
+        candidates.append(os.path.join(home, ".kaggle", "kaggle.json"))
+
+        kaggle_json_path = next((p for p in candidates if p and os.path.exists(p)), None)
+        if kaggle_json_path is None:
+            errors.append(
+                "Missing Kaggle credentials: set KAGGLE_USERNAME/KAGGLE_KEY or provide `kaggle.json` "
+                "at repo root or ~/.kaggle/kaggle.json."
+            )
+        else:
+            # Validate structure without printing secrets.
+            try:
+                with open(kaggle_json_path, "r", encoding="utf-8") as f:
+                    creds = json.load(f)
+                if not isinstance(creds, dict):
+                    raise ValueError("kaggle.json must be a JSON object")
+                if not creds.get("username") or not creds.get("key"):
+                    raise ValueError("kaggle.json must contain non-empty 'username' and 'key'")
+                try:
+                    st_mode = os.stat(kaggle_json_path).st_mode & 0o777
+                    if st_mode != 0o600:
+                        warnings.append(
+                            f"`{kaggle_json_path}` permissions are {oct(st_mode)}; Kaggle recommends 0o600."
+                        )
+                except Exception:
+                    pass
+                logger.info(f"Preflight: Found kaggle.json at {kaggle_json_path}.")
+            except Exception as e:
+                errors.append(f"Invalid kaggle.json at `{kaggle_json_path}`: {e}")
+
+    # Confirm Kaggle API can initialize/authenticate (fails fast on malformed creds).
+    try:
+        try:
+            import kaggle  # type: ignore
+
+            logger.info(f"Preflight: kaggle package version {getattr(kaggle, '__version__', 'unknown')}.")
+        except Exception:
+            pass
+
+        from kaggle.api.kaggle_api_extended import KaggleApi  # type: ignore
+
+        api = KaggleApi()
+        api.authenticate()
+        logger.info("Preflight: Kaggle API authentication OK.")
+    except Exception as e:
+        errors.append(f"Kaggle API authentication failed: {e}")
+
+    # Codex CLI required in real mode.
+    simulation_mode = bool(config.get("simulation_mode", False))
+    if simulation_mode:
+        optional_cmd("codex", why="not required in simulation_mode=true")
+    else:
+        require_cmd("codex", why="required when simulation_mode=false to run Codex workers")
+
+    # Crawler dependencies (only if enabled).
+    use_crawler = bool(config.get("use_crawler", True))
+    if use_crawler:
+        # Ensure crawl4ai-doctor is installed (comes from crawl4ai package).
+        require_cmd("crawl4ai-doctor", why="required for crawler health checks (crawl4ai)")
+
+        # Run crawl4ai-doctor (best-effort, but fail if it reports an unhealthy environment).
+        try:
+            proc = subprocess.run(
+                ["crawl4ai-doctor"],
+                capture_output=True,
+                text=True,
+                timeout=120,
+                check=False,
+            )
+            if proc.returncode != 0:
+                tail = (proc.stdout or "")[-800:] + (proc.stderr or "")[-800:]
+                errors.append(f"`crawl4ai-doctor` failed (exit={proc.returncode}). Output (tail): {tail.strip()}")
+            else:
+                logger.info("Preflight: crawl4ai-doctor OK.")
+        except subprocess.TimeoutExpired:
+            errors.append("`crawl4ai-doctor` timed out. Try running `uv run crawl4ai-doctor` manually.")
+        except Exception as e:
+            errors.append(f"`crawl4ai-doctor` check failed: {e}")
+
+        # Verify Playwright is installed and Chromium can launch headlessly.
+        try:
+            cmd = [
+                sys.executable,
+                "-c",
+                (
+                    "from playwright.sync_api import sync_playwright\n"
+                    "with sync_playwright() as p:\n"
+                    "    b = p.chromium.launch(headless=True)\n"
+                    "    b.close()\n"
+                    "print('OK')\n"
+                ),
+            ]
+            proc = subprocess.run(cmd, capture_output=True, text=True, timeout=30, check=False)
+            if proc.returncode != 0:
+                tail = (proc.stdout or "")[-500:] + (proc.stderr or "")[-500:]
+                errors.append(
+                    "Playwright/Chromium check failed. Install browsers with "
+                    "`uv run python -m playwright install chromium`.\n"
+                    f"Details (tail): {tail.strip()}"
+                )
+            else:
+                logger.info("Preflight: Playwright Chromium launch OK.")
+        except subprocess.TimeoutExpired:
+            errors.append("Playwright/Chromium check timed out. Try `uv run python -m playwright install chromium`.")
+        except Exception as e:
+            errors.append(f"Playwright check failed: {e}")
+
+    if warnings:
+        logger.warning(_format_preflight_block("Preflight warnings", warnings))
+
+    if errors:
+        msg = _format_preflight_block("Preflight failed", errors)
+        logger.critical(msg)
+        print(msg, file=sys.stderr)
+        sys.exit(1)
+
+    logger.info("Preflight checks passed.")
+
 
 def main():
     parser = argparse.ArgumentParser(description="AutoKaggle - Automated Kaggle Competition System")
@@ -50,6 +208,9 @@ def main():
 
     logger.info("Logger initialized.")
     logger.info(f"Using configuration: {config}")
+
+    # Fail fast on missing tools / credentials before any heavy execution.
+    _run_preflight_checks(config, logger)
 
     # Detect system specifications
     logger.info("Detecting system specifications...")
