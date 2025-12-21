@@ -14,13 +14,14 @@ import datetime
 from ..core.base_component import BaseComponent
 from ..data_models import ExperimentHypothesis, ContinuationHypothesis
 from ..utils.file_utils import ensure_dir, remove_dir
+from .run_state import RunStateManager, EVENT_RESUME_ATTEMPT
 from ..utils.codex_live_view_launcher import CodexLiveViewLauncher
 from .session_manager import SessionManager, SessionStatus
 from ..utils.resource_monitor import ResourceMonitor
 from ..utils.gpu_allocator import GPUAllocator
 
 class ExperimentOrchestrator(BaseComponent):
-    def __init__(self, config: dict):
+    def __init__(self, config: dict, run_state_manager: Optional[RunStateManager] = None):
         super().__init__(config)
         # Use experiment_run_dir if available (timestamped), otherwise fall back to experiments_base_dir
         self.experiment_run_dir = config.get("experiment_run_dir", config.get("experiments_base_dir", "./experiments"))
@@ -49,7 +50,7 @@ class ExperimentOrchestrator(BaseComponent):
         # Track resumed processes for session continuation
         self._resumed_processes: Dict[str, Tuple[subprocess.Popen, str]] = {}
 
-        # Track resume retry counts per experiment (for failed resume attempts)
+        # Track resume retry counts per experiment (fallback if run_state is unavailable)
         self._resume_retry_count: Dict[str, int] = {}
 
         # Resolved uv command (absolute path if found); used for worktree env setup and dry-run execution.
@@ -68,6 +69,9 @@ class ExperimentOrchestrator(BaseComponent):
 
         # Dry-run marker prefix used by src/execution/wca_simulator.py
         self._dry_run_training_done_prefix = "DRYRUN_TRAINING_DONE_"
+
+        # Optional run state manager for persistent resume tracking
+        self.run_state_manager = run_state_manager
 
     def _maybe_spawn_live_view(self, *, label: str, jsonl_path: str, pid: int | None) -> None:
         """
@@ -644,7 +648,15 @@ Please execute the experiment exactly as described above. Ensure you:
         # 4. Handle sessions needing resume
         # Note: execute_codex_resume() is BLOCKING - it waits for the resumed session to complete
         for exp_id, process, worktree_path in sessions_needing_resume:
-            resumed = self._trigger_resume(exp_id, process, worktree_path)
+            if not self._can_attempt_resume(exp_id):
+                self.logger.error(f"Resume attempt limit reached for {exp_id}. Marking as failed.")
+                done_file_path = os.path.join(worktree_path, f"DONE_{exp_id}")
+                with open(done_file_path, 'w') as f:
+                    f.write("RESUME_FAILURE")
+                completed_ids.append(exp_id)
+                continue
+
+            resumed = self._trigger_resume(exp_id, process, worktree_path, reason="auto-resume")
             if resumed:
                 # Resume completed successfully (blocking call returned)
                 # Check if experiment actually completed by looking for DONE file or status
@@ -672,24 +684,24 @@ Please execute the experiment exactly as described above. Ensure you:
                     self.logger.warning(f"Resume completed for {exp_id} but experiment not finished. Continuing to monitor.")
                     still_active_processes[exp_id] = (process, worktree_path)
 
-                # Reset retry count on successful resume
+                # Reset retry count on successful resume (fallback counter only)
                 self._resume_retry_count[exp_id] = 0
             else:
-                # Resume failed - check retry count
-                retry_count = self._resume_retry_count.get(exp_id, 0)
-                if retry_count < 1:
-                    # First failure - increment retry count and keep in active processes for retry
-                    self._resume_retry_count[exp_id] = retry_count + 1
+                # Resume failed - check retry count (persisted)
+                retry_count = self._get_resume_attempts(exp_id)
+                limit = int(self.config.get("waa_resume_max_attempts", 2))
+                if retry_count < limit:
+                    # Keep in active processes for retry
                     still_active_processes[exp_id] = (process, worktree_path)
-                    self.logger.warning(f"Resume failed for {exp_id} (attempt {retry_count + 1}/2). Will retry next check.")
+                    self.logger.warning(f"Resume failed for {exp_id} (attempt {retry_count}/{limit}). Will retry next check.")
                 else:
-                    # Second failure - mark as failed and complete
-                    self.logger.error(f"Resume failed for {exp_id} after {retry_count + 1} attempts. Marking as failed.")
+                    # Exhausted attempts - mark as failed
+                    self.logger.error(f"Resume failed for {exp_id} after {retry_count} attempts. Marking as failed.")
                     done_file_path = os.path.join(worktree_path, f"DONE_{exp_id}")
                     with open(done_file_path, 'w') as f:
                         f.write("RESUME_FAILURE")
                     completed_ids.append(exp_id)
-                    # Clean up retry count
+                    # Clean up fallback retry count
                     self._resume_retry_count.pop(exp_id, None)
 
         self.active_processes = still_active_processes
@@ -756,8 +768,47 @@ Please execute the experiment exactly as described above. Ensure you:
 
         return monitor.is_training_likely_complete(idle_threshold_minutes=idle_threshold)
 
-    def _trigger_resume(self, exp_id: str, process: subprocess.Popen, worktree_path: str) -> bool:
+    def is_training_complete(self, exp_id: str, worktree_path: str) -> bool:
+        """Public wrapper for training completion checks."""
+        return self._is_training_complete(exp_id, worktree_path)
+
+    def can_attempt_resume(self, exp_id: str) -> bool:
+        """Public wrapper to check resume attempt limits."""
+        return self._can_attempt_resume(exp_id)
+
+    def get_resume_attempts(self, exp_id: str) -> int:
+        """Public wrapper to get resume attempt count."""
+        return self._get_resume_attempts(exp_id)
+
+    def _get_resume_attempts(self, exp_id: str) -> int:
+        """Return persisted resume attempt count for an experiment."""
+        if self.run_state_manager is not None:
+            state = self.run_state_manager.get_state()
+            return state.resume_attempts.get(exp_id, 0)
+        return self._resume_retry_count.get(exp_id, 0)
+
+    def _can_attempt_resume(self, exp_id: str) -> bool:
+        """Check if resume attempts are below the configured limit."""
+        limit = int(self.config.get("waa_resume_max_attempts", 2))
+        return self._get_resume_attempts(exp_id) < limit
+
+    def _record_resume_attempt(self, exp_id: str, reason: Optional[str] = None) -> None:
+        """Record a resume attempt for an experiment."""
+        if self.run_state_manager is not None:
+            payload = {"experiment_id": exp_id}
+            if reason:
+                payload["reason"] = reason
+            self.run_state_manager.append_event(EVENT_RESUME_ATTEMPT, payload=payload)
+        else:
+            self._resume_retry_count[exp_id] = self._resume_retry_count.get(exp_id, 0) + 1
+
+    def _trigger_resume(self, exp_id: str, process: Optional[subprocess.Popen], worktree_path: str, reason: Optional[str] = None) -> bool:
         """Trigger Codex resume using `codex resume --last`."""
+        if not self._can_attempt_resume(exp_id):
+            self.logger.error(f"Resume attempt limit reached for {exp_id}. Skipping resume.")
+            return False
+
+        self._record_resume_attempt(exp_id, reason=reason)
         self.logger.info(f"Triggering session resume for {exp_id}")
 
         if self.simulation_mode:
@@ -821,7 +872,7 @@ Please execute the experiment exactly as described above. Ensure you:
             except Exception as e:
                 self.logger.warning(f"Failed to read training log: {e}")
 
-        exit_code = process.poll() if process.poll() is not None else 0
+        exit_code = process.poll() if process is not None and process.poll() is not None else 0
 
         try:
             # Import resume function
@@ -856,7 +907,7 @@ Please execute the experiment exactly as described above. Ensure you:
             self.logger.error(f"Resume failed for {exp_id}: {e}")
             return False
 
-    def _save_codex_jsonl_output(self, exp_id: str, process: subprocess.Popen, worktree_path: str):
+    def _save_codex_jsonl_output(self, exp_id: str, process: Optional[subprocess.Popen], worktree_path: str):
         """Save JSONL output from completed Codex process to worktree directory."""
         if self.simulation_mode or process is None:
             return  # Only for Codex mode
@@ -876,6 +927,23 @@ Please execute the experiment exactly as described above. Ensure you:
                     self.logger.info(f"Saved JSONL output to {jsonl_path}")
         except Exception as e:
             self.logger.warning(f"Failed to save JSONL output for {exp_id}: {e}")
+
+    def has_codex_session(self, exp_id: str, worktree_path: str) -> bool:
+        """Return True if a prior Codex session output/log appears to exist."""
+        if self.simulation_mode:
+            return True
+
+        candidates = [
+            os.path.join(worktree_path, f"codex_output_{exp_id}.jsonl"),
+            os.path.join(worktree_path, f"codex_output_{exp_id}.md"),
+            os.path.join(worktree_path, f"process_output_{exp_id}.log"),
+            os.path.join(worktree_path, f"waa_{exp_id}.log"),
+        ]
+        return any(os.path.exists(path) for path in candidates)
+
+    def resume_experiment(self, exp_id: str, worktree_path: str, reason: Optional[str] = None) -> bool:
+        """Resume an experiment without a tracked process (blocking)."""
+        return self._trigger_resume(exp_id, None, worktree_path, reason=reason)
 
     def cleanup_worktree(self, exp_id: str, worktree_path: str):
         """Clean up the specified worktree."""
