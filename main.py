@@ -180,6 +180,17 @@ def main():
         help=f"Path to configuration file (default: {DEFAULT_CONFIG_FILE})"
     )
     parser.add_argument(
+        "--resume",
+        action="store_true",
+        default=False,
+        help="Resume from an existing experiment run directory"
+    )
+    parser.add_argument(
+        "--resume-run-dir",
+        default=None,
+        help="Explicit run directory to resume (skips interactive selection)"
+    )
+    parser.add_argument(
         "--skip-confirmations", "-y",
         action="store_true",
         default=False,
@@ -189,10 +200,14 @@ def main():
 
     config_file = args.config
     skip_confirmations = args.skip_confirmations
+    resume_mode = args.resume
+    resume_run_dir = args.resume_run_dir
 
     print(f"Starting AutoKaggle with config: {config_file}")
     if skip_confirmations:
         print("Running in automatic mode (skipping all confirmations)")
+    if resume_mode:
+        print("Resume mode enabled")
 
     try:
         with open(config_file, 'r', encoding='utf-8') as f:
@@ -230,19 +245,74 @@ def main():
     # Get competition name and create timestamped directory
     competition_name = config.get("kaggle_competition_name", "unknown")
 
-    # Create timestamp for this experiment run
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-
     # Build the experiment run directory path
     experiments_root = config.get("experiments_base_dir", "./experiments")
-    experiment_run_dir = os.path.join(experiments_root, competition_name, timestamp)
 
-    # Update config with the run-specific directory
-    config['experiment_run_dir'] = experiment_run_dir
-    config['timestamp'] = timestamp
+    def _select_resume_dir(root: str, competition: str) -> str | None:
+        base_dir = os.path.join(root, competition)
+        if not os.path.exists(base_dir):
+            return None
+        candidates = []
+        for entry in sorted(os.listdir(base_dir)):
+            full_path = os.path.join(base_dir, entry)
+            if not os.path.isdir(full_path):
+                continue
+            run_state_path = os.path.join(full_path, "run_state.json")
+            if os.path.exists(run_state_path):
+                candidates.append(full_path)
+        if not candidates:
+            return None
 
-    # Create run directories up front
-    logger.info(f"Creating experiment directories at: {experiment_run_dir}")
+        print("Available runs:")
+        for idx, path in enumerate(candidates, 1):
+            print(f"  [{idx}] {path}")
+
+        while True:
+            choice = input(f"Select a run to resume [1-{len(candidates)}] (or 'q' to cancel): ").strip()
+            if choice.lower() in ("q", "quit", "exit"):
+                return None
+            try:
+                index = int(choice)
+                if 1 <= index <= len(candidates):
+                    return candidates[index - 1]
+            except ValueError:
+                pass
+            print("Invalid selection. Please try again.")
+
+    if resume_mode:
+        if resume_run_dir:
+            experiment_run_dir = resume_run_dir
+        else:
+            experiment_run_dir = _select_resume_dir(experiments_root, competition_name)
+            if not experiment_run_dir:
+                print("No resumable runs found. Exiting.")
+                sys.exit(1)
+
+        if not os.path.isdir(experiment_run_dir):
+            print(f"Resume directory not found: {experiment_run_dir}")
+            sys.exit(1)
+
+        run_state_path = os.path.join(experiment_run_dir, "run_state.json")
+        if not os.path.exists(run_state_path):
+            print(f"Run state file not found in {experiment_run_dir}. Cannot resume this run.")
+            sys.exit(1)
+
+        # Update config with the run-specific directory
+        config['experiment_run_dir'] = experiment_run_dir
+        config['timestamp'] = os.path.basename(experiment_run_dir)
+        config['resume_mode'] = True
+    else:
+        # Create timestamp for this experiment run
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        experiment_run_dir = os.path.join(experiments_root, competition_name, timestamp)
+
+        # Update config with the run-specific directory
+        config['experiment_run_dir'] = experiment_run_dir
+        config['timestamp'] = timestamp
+        config['resume_mode'] = False
+
+    # Create run directories up front (or ensure they exist)
+    logger.info(f"Using experiment directories at: {experiment_run_dir}")
     ensure_dir(experiment_run_dir)
     ensure_dir(os.path.join(experiment_run_dir, "worktrees"))
     ensure_dir(os.path.join(experiment_run_dir, "results"))

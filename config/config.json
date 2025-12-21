@@ -21,6 +21,7 @@
   "kaggle_score_wait_timeout_seconds": 300,
   "kaggle_score_poll_interval_seconds": 10,
   "process_completion_grace_seconds": 120,
+  "waa_resume_max_attempts": 2,
   "training_idle_threshold_minutes": 3,
   "resource_monitor_interval_seconds": 30,
   "codex_live_view": {
