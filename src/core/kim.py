@@ -5,6 +5,9 @@ import zipfile
 import subprocess
 import sys
 import json
+import time
+import threading
+from collections import deque
 from pathlib import Path
 from typing import Optional, List, Dict, Any
 
@@ -85,12 +88,106 @@ class KaggleInterfaceManager(BaseComponent):
                 cmd.append("--force")
             
             self.logger.info(f"Running kaggle_crawler for competition: {self.competition_name}")
-            result = subprocess.run(cmd, capture_output=True, text=True)
-            
-            if result.returncode != 0:
-                self.logger.error(f"Crawler failed: {result.stderr}")
+
+            # Stream output to avoid hanging on long runs and detect completion markers.
+            proc = subprocess.Popen(
+                cmd,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                bufsize=1,
+            )
+
+            output_tail = deque(maxlen=200)
+            completion_seen_at: Optional[float] = None
+
+            def _reader():
+                nonlocal completion_seen_at
+                if not proc.stdout:
+                    return
+                for raw in proc.stdout:
+                    line = raw.rstrip("\n")
+                    if not line:
+                        continue
+                    output_tail.append(line)
+                    # Detect the crawler's natural completion marker.
+                    if "=== All done ===" in line or line.startswith("[output] files saved"):
+                        completion_seen_at = time.monotonic()
+                    self.logger.debug(f"[crawler] {line}")
+                try:
+                    proc.stdout.close()
+                except Exception:
+                    pass
+
+            reader_thread = threading.Thread(target=_reader, daemon=True)
+            reader_thread.start()
+
+            timeout = self.config.get("crawler_timeout_seconds")
+            completion_grace = float(self.config.get("crawler_completion_grace_seconds", 20.0))
+            start_ts = time.monotonic()
+            terminated_after_completion = False
+
+            while True:
+                ret = proc.poll()
+                if ret is not None:
+                    break
+
+                if completion_seen_at is not None:
+                    if time.monotonic() - completion_seen_at > completion_grace:
+                        self.logger.warning(
+                            "Crawler reported completion but process still running; terminating after grace period."
+                        )
+                        proc.terminate()
+                        try:
+                            proc.wait(timeout=10)
+                        except subprocess.TimeoutExpired:
+                            proc.kill()
+                            proc.wait(timeout=10)
+                        terminated_after_completion = True
+                        break
+
+                if timeout is not None and (time.monotonic() - start_ts) > float(timeout):
+                    self.logger.error(f"Crawler timed out after {timeout} seconds; terminating.")
+                    proc.terminate()
+                    try:
+                        proc.wait(timeout=10)
+                    except subprocess.TimeoutExpired:
+                        proc.kill()
+                        proc.wait(timeout=10)
+                    break
+
+                time.sleep(0.5)
+
+            # Ensure reader thread finishes draining output.
+            reader_thread.join(timeout=2)
+
+            retcode = proc.poll()
+            if retcode is None:
+                try:
+                    retcode = proc.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    proc.kill()
+                    retcode = proc.wait(timeout=5)
+
+            if retcode != 0:
+                tail = "\n".join(output_tail)
+                overview_file = os.path.join(
+                    self.crawler_output_dir,
+                    self.competition_name,
+                    "pages",
+                    f"{self.competition_name}_overview.md",
+                )
+                if completion_seen_at is not None or terminated_after_completion or os.path.exists(overview_file):
+                    self.logger.warning(
+                        f"Crawler exited with code {retcode}, but output appears usable. Continuing."
+                    )
+                    if tail:
+                        self.logger.debug(f"Crawler output tail:\n{tail}")
+                    return True
+
+                self.logger.error(f"Crawler failed (exit={retcode}). Output tail:\n{tail}")
                 return False
-            
+
             self.logger.info("Crawler completed successfully")
             return True
             

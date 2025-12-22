@@ -31,6 +31,7 @@ class CodexLiveViewConfig:
     title_prefix: str = "AutoKaggle"
     viewer_script_rel: str = "src/tools/codex_live_view.py"
     viewer_extra_args: list[str] = field(default_factory=list)
+    tmux_session: str = "autokaggle_live"
 
     # Viewer defaults (can be overridden by viewer_extra_args)
     viewer_from_end: bool = False
@@ -80,10 +81,12 @@ class CodexLiveViewLauncher:
             title_prefix=str(cfg.get("title_prefix", "AutoKaggle")),
             viewer_script_rel=str(cfg.get("viewer_script", "src/tools/codex_live_view.py")),
             viewer_extra_args=list(cfg.get("viewer_args", []) or []),
+            tmux_session=str(cfg.get("tmux_session", "autokaggle_live")),
             viewer_from_end=bool(cfg.get("viewer_from_end", False)),
             viewer_timestamps=bool(cfg.get("viewer_timestamps", False)),
             viewer_idle_exit_seconds=float(cfg.get("viewer_idle_exit_seconds", 3.0)),
         )
+        self._tmux_attach_hint_shown = False
 
     def enabled(self) -> bool:
         return self.cfg.enabled and self.cfg.backend.lower() not in ("off", "false", "0", "none", "")
@@ -135,15 +138,34 @@ class CodexLiveViewLauncher:
         tmux = shutil.which("tmux")
         if not tmux:
             return False
-        if not os.environ.get("TMUX"):
-            # We deliberately require being inside tmux to avoid hijacking the main terminal.
-            return False
 
         title = _sanitize_title(f"{self.cfg.title_prefix}:{label}", max_len=30)
-        cmd = [tmux, "new-window", "-n", title, "-c", str(PROJECT_ROOT), *self._viewer_cmd(label=label, jsonl_path=jsonl_path, pid=pid)]
+        if os.environ.get("TMUX"):
+            cmd = [tmux, "new-window", "-n", title, "-c", str(PROJECT_ROOT), *self._viewer_cmd(label=label, jsonl_path=jsonl_path, pid=pid)]
+        else:
+            session = _sanitize_title(self.cfg.tmux_session, max_len=30) or "autokaggle_live"
+            has_session = subprocess.run(
+                [tmux, "has-session", "-t", session],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            ).returncode == 0
+            if has_session:
+                cmd = [tmux, "new-window", "-t", session, "-n", title, "-c", str(PROJECT_ROOT), *self._viewer_cmd(label=label, jsonl_path=jsonl_path, pid=pid)]
+            else:
+                cmd = [tmux, "new-session", "-d", "-s", session, "-n", title, "-c", str(PROJECT_ROOT), *self._viewer_cmd(label=label, jsonl_path=jsonl_path, pid=pid)]
         try:
             subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-            self.logger.info(f"Spawned tmux live view window: {title} (label={label})")
+            if os.environ.get("TMUX"):
+                self.logger.info(f"Spawned tmux live view window: {title} (label={label})")
+            else:
+                if not self._tmux_attach_hint_shown:
+                    self.logger.info(
+                        f"Spawned tmux live view window: {title} (label={label}). "
+                        f"Attach with: tmux attach -t {session}"
+                    )
+                    self._tmux_attach_hint_shown = True
+                else:
+                    self.logger.info(f"Spawned tmux live view window: {title} (label={label})")
             return True
         except Exception as e:
             self.logger.warning(f"Failed to spawn tmux live view: {e}")
