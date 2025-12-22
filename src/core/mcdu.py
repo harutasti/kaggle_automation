@@ -539,7 +539,12 @@ class MasterControllerDecisionUnit(BaseComponent):
 
                         if done_failure or status_error:
                             if self.eo.can_attempt_resume(exp_id):
-                                resumed = self.eo.resume_experiment(exp_id, worktree_path, reason="pending_error")
+                                resumed = self.eo.resume_experiment(
+                                    exp_id,
+                                    worktree_path,
+                                    reason="pending_error",
+                                    resume_prompt_kind="completed_error",
+                                )
                                 if resumed:
                                     status_entry = self.eo.session_manager.read_current_status(worktree_path)
                                     status_value = status_entry.status.value if status_entry else None
@@ -566,9 +571,16 @@ class MasterControllerDecisionUnit(BaseComponent):
                             continue
 
                         if status_running:
-                            if self.eo.is_training_complete(exp_id, worktree_path):
+                            state, prompt_kind, proc_summary = self.eo.inspect_background_processes(exp_id, worktree_path)
+                            if state in ("completed", "no_processes"):
                                 if self.eo.can_attempt_resume(exp_id):
-                                    resumed = self.eo.resume_experiment(exp_id, worktree_path, reason="pending_running")
+                                    resumed = self.eo.resume_experiment(
+                                        exp_id,
+                                        worktree_path,
+                                        reason="pending_running",
+                                        resume_prompt_kind=prompt_kind,
+                                        process_summary=proc_summary,
+                                    )
                                     if resumed:
                                         status_entry = self.eo.session_manager.read_current_status(worktree_path)
                                         status_value = status_entry.status.value if status_entry else None
@@ -582,8 +594,15 @@ class MasterControllerDecisionUnit(BaseComponent):
                             continue
 
                         # Default: if training appears complete, attempt resume
-                        if self.eo.is_training_complete(exp_id, worktree_path) and self.eo.can_attempt_resume(exp_id):
-                            resumed = self.eo.resume_experiment(exp_id, worktree_path, reason="pending_default")
+                        state, prompt_kind, proc_summary = self.eo.inspect_background_processes(exp_id, worktree_path)
+                        if state in ("completed", "no_processes") and self.eo.can_attempt_resume(exp_id):
+                            resumed = self.eo.resume_experiment(
+                                exp_id,
+                                worktree_path,
+                                reason="pending_default",
+                                resume_prompt_kind=prompt_kind,
+                                process_summary=proc_summary,
+                            )
                             if resumed:
                                 status_entry = self.eo.session_manager.read_current_status(worktree_path)
                                 status_value = status_entry.status.value if status_entry else None
@@ -594,6 +613,12 @@ class MasterControllerDecisionUnit(BaseComponent):
                                 if done_success or status_value == SessionStatus.COMPLETE.value:
                                     self._collect_and_log_result(exp_id, worktree_path, iter_state, iteration_results)
                                     pending_resume.discard(exp_id)
+
+                # Emit live status updates to the main terminal each poll.
+                try:
+                    self.eo.log_live_status(running_experiments, pending_resume)
+                except Exception:
+                    pass
 
             self.all_results[self.current_iteration] = iteration_results
 
@@ -1267,7 +1292,12 @@ class MasterControllerDecisionUnit(BaseComponent):
             if done_failure or status_error:
                 if self.eo.has_codex_session(exp_id, worktree_path):
                     if self.eo.can_attempt_resume(exp_id):
-                        resumed = self.eo.resume_experiment(exp_id, worktree_path, reason="error_or_failure")
+                        resumed = self.eo.resume_experiment(
+                            exp_id,
+                            worktree_path,
+                            reason="error_or_failure",
+                            resume_prompt_kind="completed_error",
+                        )
                         if resumed:
                             # Check completion after resume
                             status_entry = self.eo.session_manager.read_current_status(worktree_path)
@@ -1306,7 +1336,17 @@ class MasterControllerDecisionUnit(BaseComponent):
             if status_running:
                 if self.eo.has_codex_session(exp_id, worktree_path):
                     if self.eo.can_attempt_resume(exp_id):
-                        resumed = self.eo.resume_experiment(exp_id, worktree_path, reason="status_running")
+                        state, prompt_kind, proc_summary = self.eo.inspect_background_processes(exp_id, worktree_path)
+                        if state == "running":
+                            pending_resume.add(exp_id)
+                            continue
+                        resumed = self.eo.resume_experiment(
+                            exp_id,
+                            worktree_path,
+                            reason="status_running",
+                            resume_prompt_kind=prompt_kind,
+                            process_summary=proc_summary,
+                        )
                         if resumed:
                             status_entry = self.eo.session_manager.read_current_status(worktree_path)
                             status_value = status_entry.status.value if status_entry else None
@@ -1343,7 +1383,12 @@ class MasterControllerDecisionUnit(BaseComponent):
             # Default path: resume if possible, otherwise restart
             if self.eo.has_codex_session(exp_id, worktree_path):
                 if self.eo.can_attempt_resume(exp_id):
-                    resumed = self.eo.resume_experiment(exp_id, worktree_path, reason="resume_default")
+                    resumed = self.eo.resume_experiment(
+                        exp_id,
+                        worktree_path,
+                        reason="resume_default",
+                        resume_prompt_kind="no_process_found",
+                    )
                     if resumed:
                         status_entry = self.eo.session_manager.read_current_status(worktree_path)
                         status_value = status_entry.status.value if status_entry else None

@@ -23,6 +23,8 @@ from typing import Optional, List, Dict, Any, Literal
 from enum import Enum
 import uuid
 
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
+
 from .codex_jsonl import write_codex_messages_file
 
 class CodexMode(Enum):
@@ -1027,7 +1029,121 @@ def _save_prompt_for_debug(
         return
 
 
-def build_resume_prompt(exp_id: str, exit_code: int, training_log_tail: str) -> str:
+RESUME_PROMPT_FILES = {
+    "completed_success": "waa_resume_success.md",
+    "completed_error": "waa_resume_error.md",
+    "no_process_found": "waa_resume_no_process.md",
+}
+
+DEFAULT_RESUME_PROMPTS = {
+    "completed_success": """The background training process appears to have completed normally.
+
+Experiment ID: {{EXPERIMENT_ID}}
+Worktree: {{WORKTREE_PATH}}
+Exit Code: {{EXIT_CODE}}
+
+Background process summary:
+{{BACKGROUND_PROCESSES}}
+
+Training Log (last 10KB):
+```
+{{TRAINING_LOG_TAIL}}
+```
+
+Your Task:
+1) Verify outputs (models, metrics) and finalize the run.
+2) If training succeeded:
+   - Create `result_{{EXPERIMENT_ID}}.json` with the score
+   - Create `submission_{{EXPERIMENT_ID}}.csv`
+   - Update `experiment-status.yaml` to COMPLETE
+   - Create `DONE_{{EXPERIMENT_ID}}` with "SUCCESS"
+3) If training failed unexpectedly:
+   - Update `experiment-status.yaml` to ERROR with details
+   - Create `DONE_{{EXPERIMENT_ID}}` with "FAILURE: <reason>"
+
+IMPORTANT: Exit immediately after completing the above.
+""",
+    "completed_error": """The background training process appears to have crashed or errored.
+
+Experiment ID: {{EXPERIMENT_ID}}
+Worktree: {{WORKTREE_PATH}}
+Exit Code: {{EXIT_CODE}}
+
+Background process summary:
+{{BACKGROUND_PROCESSES}}
+
+Training Log (last 10KB):
+```
+{{TRAINING_LOG_TAIL}}
+```
+
+Your Task:
+1) Diagnose the failure from logs and artifacts.
+2) Update `experiment-status.yaml` to ERROR with:
+   - error_type
+   - recovery_suggestion
+3) Create `DONE_{{EXPERIMENT_ID}}` with "FAILURE: <reason>".
+
+IMPORTANT: Exit immediately after completing the above.
+""",
+    "no_process_found": """No background training process was detected in the worktree.
+
+Experiment ID: {{EXPERIMENT_ID}}
+Worktree: {{WORKTREE_PATH}}
+Exit Code: {{EXIT_CODE}}
+
+Training Log (last 10KB):
+```
+{{TRAINING_LOG_TAIL}}
+```
+
+Your Task:
+1) Inspect logs and artifacts to determine the current state.
+2) If training actually finished:
+   - Create `result_{{EXPERIMENT_ID}}.json` and `submission_{{EXPERIMENT_ID}}.csv`
+   - Update `experiment-status.yaml` to COMPLETE
+   - Create `DONE_{{EXPERIMENT_ID}}` with "SUCCESS"
+3) If nothing was run or it failed:
+   - Update `experiment-status.yaml` to ERROR with details
+   - Create `DONE_{{EXPERIMENT_ID}}` with "FAILURE: <reason>"
+
+IMPORTANT: Exit immediately after completing the above.
+""",
+}
+
+
+def _resolve_prompts_dir(prompts_dir: str | Path) -> Path:
+    p = Path(prompts_dir)
+    if not p.is_absolute():
+        p = PROJECT_ROOT / p
+    return p
+
+
+def _load_resume_prompt_template(prompt_kind: str, prompts_dir: str | Path) -> str:
+    filename = RESUME_PROMPT_FILES.get(prompt_kind)
+    if not filename:
+        return DEFAULT_RESUME_PROMPTS["no_process_found"]
+
+    prompts_root = _resolve_prompts_dir(prompts_dir)
+    template_path = prompts_root / "WAA" / filename
+    if template_path.exists():
+        try:
+            return template_path.read_text(encoding="utf-8")
+        except Exception:
+            pass
+    return DEFAULT_RESUME_PROMPTS.get(prompt_kind, DEFAULT_RESUME_PROMPTS["no_process_found"])
+
+
+def build_resume_prompt(
+    exp_id: str,
+    exit_code: int,
+    training_log_tail: str,
+    *,
+    prompt_kind: Optional[str] = None,
+    prompts_dir: str | Path = "prompts",
+    worktree_path: str | Path | None = None,
+    process_summary: Optional[str] = None,
+) -> str:
     """
     Build prompt to guide resumed session after training completes.
 
@@ -1035,56 +1151,28 @@ def build_resume_prompt(exp_id: str, exit_code: int, training_log_tail: str) -> 
         exp_id: Experiment identifier
         exit_code: Exit code from previous process (0 = success)
         training_log_tail: Last portion of training log
+        prompt_kind: One of completed_success, completed_error, no_process_found
+        prompts_dir: Base prompts directory
+        worktree_path: Optional worktree path for context
+        process_summary: Optional background process summary
 
     Returns:
         Formatted prompt string for resume session
     """
-    return f"""The training process has completed or exited.
-
-**Experiment ID**: {exp_id}
-**Exit Code**: {exit_code}
-
-**Training Log (last 10KB)**:
-```
-{training_log_tail[-10000:] if training_log_tail else '[No training log found]'}
-```
-
-**Your Task**:
-
-1. **Check if training completed successfully**:
-   - Look for model files (.pkl, .pt, .pth, .bin, .h5, .joblib)
-   - Check the training log for completion messages or final metrics
-   - Verify no error messages in the log
-
-2. **If training was successful**:
-   - Run inference on the test data if not already done
-   - Create `result_{exp_id}.json` with the validation/CV score:
-     ```json
-     {{"score": <validation_score>}}
-     ```
-   - Create `submission_{exp_id}.csv` with predictions in competition format
-   - Update `experiment-status.yaml`:
-     ```yaml
-       - timestamp: "<current_timestamp>"
-         status: COMPLETE
-         message: "Training complete. Score: <score>"
-     ```
-   - Create `DONE_{exp_id}` file with "SUCCESS"
-
-3. **If training failed**:
-   - Analyze the error from the training log
-   - Update `experiment-status.yaml`:
-     ```yaml
-       - timestamp: "<current_timestamp>"
-         status: ERROR
-         message: "<error description>"
-         error_type: "<error_category>"
-         recovery_suggestion: "<what could fix it>"
-     ```
-   - Create `DONE_{exp_id}` file with "FAILURE: <reason>"
-
-**IMPORTANT**: After completing these tasks, exit immediately.
-"""
+    kind = prompt_kind or "no_process_found"
+    template = _load_resume_prompt_template(kind, prompts_dir)
+    tail = training_log_tail[-10000:] if training_log_tail else "[No training log found]"
+    summary = process_summary or "None"
+    replacements = {
+        "{{EXPERIMENT_ID}}": exp_id,
+        "{{EXIT_CODE}}": str(exit_code),
+        "{{TRAINING_LOG_TAIL}}": tail,
+        "{{WORKTREE_PATH}}": str(worktree_path or ""),
+        "{{BACKGROUND_PROCESSES}}": summary,
+    }
+    for key, value in replacements.items():
+        template = template.replace(key, value)
+    return template
 
 
 def execute_codex_resume(

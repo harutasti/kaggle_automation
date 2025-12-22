@@ -6,7 +6,7 @@ import subprocess
 import multiprocessing
 import json
 import sys
-from typing import List, Dict, Tuple, Optional
+from typing import List, Dict, Tuple, Optional, Iterable, Any
 import git # GitPython
 
 import datetime
@@ -49,6 +49,9 @@ class ExperimentOrchestrator(BaseComponent):
 
         # Track resumed processes for session continuation
         self._resumed_processes: Dict[str, Tuple[subprocess.Popen, str]] = {}
+
+        # Track background processes when Codex exits with RUNNING status
+        self._background_process_watch: Dict[str, Dict[str, Any]] = {}
 
         # Track resume retry counts per experiment (fallback if run_state is unavailable)
         self._resume_retry_count: Dict[str, int] = {}
@@ -522,7 +525,7 @@ Please execute the experiment exactly as described above. Ensure you:
         """Check running experiments with status-aware completion detection."""
         completed_ids = []
         still_active_processes = {}
-        sessions_needing_resume = []
+        sessions_needing_resume: List[Tuple[str, subprocess.Popen, str, Optional[str], str]] = []
 
         if not self.active_processes:
             return []
@@ -595,12 +598,15 @@ Please execute the experiment exactly as described above. Ensure you:
                     self._completion_grace_started_at.pop(exp_id, None)
                     # Process exited with RUNNING status - check if training is complete
                     if process.poll() is not None:
-                        # Codex session exited, training may still be running in background
-                        if self._is_training_complete(exp_id, worktree_path):
-                            sessions_needing_resume.append((exp_id, process, worktree_path))
-                        else:
-                            # Training still running, keep tracking
+                        # Codex session exited, check for background processes in the worktree
+                        state, prompt_kind, proc_summary = self.inspect_background_processes(exp_id, worktree_path)
+                        if state == "running":
+                            # Background processes still running, keep tracking
                             still_active_processes[exp_id] = (process, worktree_path)
+                        else:
+                            sessions_needing_resume.append(
+                                (exp_id, process, worktree_path, prompt_kind, proc_summary)
+                            )
                     else:
                         # Codex session still running
                         still_active_processes[exp_id] = (process, worktree_path)
@@ -653,7 +659,7 @@ Please execute the experiment exactly as described above. Ensure you:
 
         # 4. Handle sessions needing resume
         # Note: execute_codex_resume() is BLOCKING - it waits for the resumed session to complete
-        for exp_id, process, worktree_path in sessions_needing_resume:
+        for exp_id, process, worktree_path, prompt_kind, proc_summary in sessions_needing_resume:
             if not self._can_attempt_resume(exp_id):
                 self.logger.error(f"Resume attempt limit reached for {exp_id}. Marking as failed.")
                 done_file_path = os.path.join(worktree_path, f"DONE_{exp_id}")
@@ -662,7 +668,14 @@ Please execute the experiment exactly as described above. Ensure you:
                 completed_ids.append(exp_id)
                 continue
 
-            resumed = self._trigger_resume(exp_id, process, worktree_path, reason="auto-resume")
+            resumed = self._trigger_resume(
+                exp_id,
+                process,
+                worktree_path,
+                reason="auto-resume",
+                resume_prompt_kind=prompt_kind,
+                process_summary=proc_summary,
+            )
             if resumed:
                 # Resume completed successfully (blocking call returned)
                 # Check if experiment actually completed by looking for DONE file or status
@@ -759,20 +772,230 @@ Please execute the experiment exactly as described above. Ensure you:
         with open(done_file_path, 'w') as f:
             f.write("UNEXPECTED_FAILURE")
 
-    def _is_training_complete(self, exp_id: str, worktree_path: str) -> bool:
-        """Check if training is complete using resource monitoring."""
+    def _path_within(self, base: str, path: str) -> bool:
+        """Return True if path is within base (best-effort)."""
+        try:
+            base_abs = os.path.abspath(base)
+            path_abs = os.path.abspath(path)
+            return os.path.commonpath([base_abs, path_abs]) == base_abs
+        except Exception:
+            return False
+
+    def _list_relevant_processes(self, worktree_path: str) -> Dict[int, Dict[str, Any]]:
+        """
+        Return processes that appear to be running inside the worktree directory.
+
+        Primary signal: process cwd is under worktree_path.
+        Fallback: command line includes the worktree path.
+        """
+        base = os.path.abspath(worktree_path)
+        relevant: Dict[int, Dict[str, Any]] = {}
+
+        try:
+            import psutil  # type: ignore
+        except Exception:
+            psutil = None  # type: ignore
+
+        if psutil is not None:
+            for proc in psutil.process_iter(attrs=["pid", "name", "cmdline", "cwd"]):
+                try:
+                    pid = int(proc.info.get("pid", 0))
+                    if pid in (os.getpid(), os.getppid()):
+                        continue
+                    cmdline = proc.info.get("cmdline") or []
+                    cmdline_str = " ".join(cmdline)
+                    if "codex_live_view.py" in cmdline_str:
+                        continue
+                    cwd = proc.info.get("cwd") or ""
+                    name = proc.info.get("name") or ""
+                    is_relevant = False
+                    if cwd and self._path_within(base, cwd):
+                        is_relevant = True
+                    elif cmdline and any(base in str(arg) for arg in cmdline):
+                        is_relevant = True
+                    if is_relevant:
+                        relevant[pid] = {
+                            "pid": pid,
+                            "name": name,
+                            "cmdline": cmdline,
+                            "cwd": cwd,
+                        }
+                except Exception:
+                    continue
+            return relevant
+
+        # Fallback without psutil: inspect `ps` output for worktree path in command line
+        try:
+            result = subprocess.run(
+                ["ps", "-eo", "pid=,args="],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            for line in (result.stdout or "").splitlines():
+                line = line.strip()
+                if not line:
+                    continue
+                parts = line.split(None, 1)
+                if not parts:
+                    continue
+                try:
+                    pid = int(parts[0])
+                except Exception:
+                    continue
+                if pid in (os.getpid(), os.getppid()):
+                    continue
+                cmd = parts[1] if len(parts) > 1 else ""
+                if "codex_live_view.py" in cmd:
+                    continue
+                if base in cmd:
+                    relevant[pid] = {
+                        "pid": pid,
+                        "name": cmd.split()[0] if cmd else "",
+                        "cmdline": cmd,
+                        "cwd": "",
+                    }
+        except Exception:
+            pass
+
+        return relevant
+
+    def _summarize_processes(self, processes: Dict[int, Dict[str, Any]]) -> str:
+        if not processes:
+            return "None"
+        lines = []
+        for pid in sorted(processes):
+            info = processes[pid]
+            cmd = info.get("cmdline", "")
+            if isinstance(cmd, list):
+                cmd = " ".join(cmd)
+            name = info.get("name") or ""
+            cwd = info.get("cwd") or ""
+            detail = cmd or name or "unknown"
+            if cwd:
+                detail = f"{detail} (cwd={cwd})"
+            lines.append(f"- pid {pid}: {detail}")
+        return "\n".join(lines)
+
+    def _detect_error_outcome(self, exp_id: str, worktree_path: str) -> bool:
+        """Best-effort detection of background process failure."""
+        # Status file
+        try:
+            status_entry = self.session_manager.read_current_status(worktree_path)
+            if status_entry and status_entry.status == SessionStatus.ERROR:
+                return True
+        except Exception:
+            pass
+
+        # DONE marker
+        done_path = os.path.join(worktree_path, f"DONE_{exp_id}")
+        if os.path.exists(done_path):
+            try:
+                content = open(done_path, "r", encoding="utf-8").read().strip().lower()
+                if "fail" in content or "error" in content:
+                    return True
+            except Exception:
+                pass
+
+        # Log tail heuristics
+        error_keywords = [
+            "traceback", "exception", "error", "failed", "runtimeerror",
+            "fatal", "segmentation fault", "killed"
+        ]
+        log_candidates = [
+            os.path.join(worktree_path, "training.log"),
+            os.path.join(worktree_path, f"waa_{exp_id}.log"),
+        ]
+        for log_path in log_candidates:
+            if not os.path.exists(log_path):
+                continue
+            try:
+                with open(log_path, "r", encoding="utf-8") as f:
+                    tail = f.read()[-10000:].lower()
+                if any(tok in tail for tok in error_keywords):
+                    return True
+            except Exception:
+                continue
+
+        return False
+
+    def inspect_background_processes(
+        self,
+        exp_id: str,
+        worktree_path: str
+    ) -> tuple[str, Optional[str], str]:
+        """
+        Inspect background processes in the worktree.
+
+        Returns:
+            (state, prompt_kind, process_summary)
+            state: "running" | "completed" | "no_processes"
+            prompt_kind: one of "completed_success", "completed_error", "no_process_found" when applicable
+        """
         if self.simulation_mode:
             marker = os.path.join(worktree_path, f"{self._dry_run_training_done_prefix}{exp_id}")
-            return os.path.exists(marker)
+            if os.path.exists(marker):
+                return "completed", "completed_success", "None"
+            return "running", None, "None"
 
-        # Get or create resource monitor for this experiment
-        if exp_id not in self._resource_monitors:
-            self._resource_monitors[exp_id] = ResourceMonitor(worktree_path, self.logger)
+        current = self._list_relevant_processes(worktree_path)
+        watch = self._background_process_watch.get(exp_id)
 
-        monitor = self._resource_monitors[exp_id]
-        idle_threshold = self.config.get("training_idle_threshold_minutes", 3)
+        if not current:
+            if watch:
+                # Background processes finished since last check
+                summary = self._summarize_processes(watch.get("last_known", {}))
+                error = self._detect_error_outcome(exp_id, worktree_path)
+                self._background_process_watch.pop(exp_id, None)
+                kind = "completed_error" if error else "completed_success"
+                return "completed", kind, summary
+            # No processes observed at all
+            return "no_processes", "no_process_found", "None"
 
-        return monitor.is_training_likely_complete(idle_threshold_minutes=idle_threshold)
+        # Processes are still running; update watch
+        summary = self._summarize_processes(current)
+        self._background_process_watch[exp_id] = {
+            "last_known": current,
+            "last_seen_at": time.time(),
+        }
+        return "running", None, summary
+
+    def log_live_status(self, active_ids: Iterable[str], pending_resume: Iterable[str]) -> None:
+        """Emit a live status line for each active/pending WAA to the main terminal."""
+        all_ids = sorted(set(active_ids) | set(pending_resume))
+        if not all_ids:
+            return
+
+        parts = []
+        for exp_id in all_ids:
+            worktree_path = self.get_worktree_path(exp_id) or ""
+            status_entry = None
+            try:
+                if worktree_path:
+                    status_entry = self.session_manager.read_current_status(worktree_path)
+            except Exception:
+                status_entry = None
+            status_value = status_entry.status.value if status_entry else "UNKNOWN"
+
+            proc = self.active_processes.get(exp_id)
+            codex_state = "codex=RUNNING" if proc and proc[0].poll() is None else "codex=EXITED"
+
+            extras = []
+            if exp_id in pending_resume:
+                extras.append("pending_resume")
+            watch = self._background_process_watch.get(exp_id)
+            if watch and watch.get("last_known"):
+                extras.append(f"bg_procs={len(watch.get('last_known', {}))}")
+
+            extra_str = f" ({', '.join(extras)})" if extras else ""
+            parts.append(f"{exp_id}:{status_value} {codex_state}{extra_str}")
+
+        self.logger.info("WAA status: " + " | ".join(parts))
+
+    def _is_training_complete(self, exp_id: str, worktree_path: str) -> bool:
+        """Check if training is complete using background process detection."""
+        state, _, _ = self.inspect_background_processes(exp_id, worktree_path)
+        return state in ("completed", "no_processes")
 
     def is_training_complete(self, exp_id: str, worktree_path: str) -> bool:
         """Public wrapper for training completion checks."""
@@ -808,7 +1031,15 @@ Please execute the experiment exactly as described above. Ensure you:
         else:
             self._resume_retry_count[exp_id] = self._resume_retry_count.get(exp_id, 0) + 1
 
-    def _trigger_resume(self, exp_id: str, process: Optional[subprocess.Popen], worktree_path: str, reason: Optional[str] = None) -> bool:
+    def _trigger_resume(
+        self,
+        exp_id: str,
+        process: Optional[subprocess.Popen],
+        worktree_path: str,
+        reason: Optional[str] = None,
+        resume_prompt_kind: Optional[str] = None,
+        process_summary: Optional[str] = None,
+    ) -> bool:
         """Trigger Codex resume using `codex resume --last`."""
         if not self._can_attempt_resume(exp_id):
             self.logger.error(f"Resume attempt limit reached for {exp_id}. Skipping resume.")
@@ -884,7 +1115,21 @@ Please execute the experiment exactly as described above. Ensure you:
             # Import resume function
             from ..utils.codex_executor import execute_codex_resume, build_resume_prompt
 
-            resume_prompt = build_resume_prompt(exp_id, exit_code, training_log_tail)
+            if resume_prompt_kind is None:
+                if reason and reason in ("pending_error", "error_or_failure"):
+                    resume_prompt_kind = "completed_error"
+                else:
+                    resume_prompt_kind = "no_process_found"
+
+            resume_prompt = build_resume_prompt(
+                exp_id,
+                exit_code,
+                training_log_tail,
+                prompt_kind=resume_prompt_kind,
+                prompts_dir=self.config.get("prompts_dir", "prompts"),
+                worktree_path=worktree_path,
+                process_summary=process_summary,
+            )
 
             # Use `codex resume --last` to continue the session
             codex_responses_dir = os.path.join(self.experiment_run_dir, "codex-responses", "WAA")
@@ -947,9 +1192,23 @@ Please execute the experiment exactly as described above. Ensure you:
         ]
         return any(os.path.exists(path) for path in candidates)
 
-    def resume_experiment(self, exp_id: str, worktree_path: str, reason: Optional[str] = None) -> bool:
+    def resume_experiment(
+        self,
+        exp_id: str,
+        worktree_path: str,
+        reason: Optional[str] = None,
+        resume_prompt_kind: Optional[str] = None,
+        process_summary: Optional[str] = None,
+    ) -> bool:
         """Resume an experiment without a tracked process (blocking)."""
-        return self._trigger_resume(exp_id, None, worktree_path, reason=reason)
+        return self._trigger_resume(
+            exp_id,
+            None,
+            worktree_path,
+            reason=reason,
+            resume_prompt_kind=resume_prompt_kind,
+            process_summary=process_summary,
+        )
 
     def cleanup_worktree(self, exp_id: str, worktree_path: str):
         """Clean up the specified worktree."""
