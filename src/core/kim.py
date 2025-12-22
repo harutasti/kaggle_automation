@@ -82,24 +82,29 @@ class KaggleInterfaceManager(BaseComponent):
                 self.logger.error(f"Crawler script not found: {crawler_script}")
                 return False
             
-            cmd = [sys.executable, crawler_script, self.competition_name, 
+            cmd = [sys.executable, "-u", crawler_script, self.competition_name,
                    f"--max-discussions", str(self.max_discussions)]
             if force:
                 cmd.append("--force")
-            
+
             self.logger.info(f"Running kaggle_crawler for competition: {self.competition_name}")
 
             # Stream output to avoid hanging on long runs and detect completion markers.
+            env = os.environ.copy()
+            env["PYTHONUNBUFFERED"] = "1"
             proc = subprocess.Popen(
                 cmd,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.STDOUT,
                 text=True,
                 bufsize=1,
+                env=env,
             )
 
             output_tail = deque(maxlen=200)
             completion_seen_at: Optional[float] = None
+            last_output_at: Optional[float] = None
+            stream_output = bool(self.config.get("crawler_stream_output", True))
 
             def _reader():
                 nonlocal completion_seen_at
@@ -109,10 +114,13 @@ class KaggleInterfaceManager(BaseComponent):
                     line = raw.rstrip("\n")
                     if not line:
                         continue
+                    last_output_at = time.monotonic()
                     output_tail.append(line)
                     # Detect the crawler's natural completion marker.
                     if "=== All done ===" in line or line.startswith("[output] files saved"):
                         completion_seen_at = time.monotonic()
+                    if stream_output:
+                        print(line, flush=True)
                     self.logger.debug(f"[crawler] {line}")
                 try:
                     proc.stdout.close()
@@ -123,6 +131,7 @@ class KaggleInterfaceManager(BaseComponent):
             reader_thread.start()
 
             timeout = self.config.get("crawler_timeout_seconds")
+            idle_timeout = self.config.get("crawler_output_idle_seconds", 600)
             completion_grace = float(self.config.get("crawler_completion_grace_seconds", 20.0))
             start_ts = time.monotonic()
             terminated_after_completion = False
@@ -145,6 +154,46 @@ class KaggleInterfaceManager(BaseComponent):
                             proc.wait(timeout=10)
                         terminated_after_completion = True
                         break
+
+                if (
+                    idle_timeout
+                    and last_output_at is not None
+                    and time.monotonic() - last_output_at > float(idle_timeout)
+                ):
+                    overview_path = os.path.join(
+                        self.crawler_output_dir,
+                        self.competition_name,
+                        "pages",
+                        f"{self.competition_name}_overview.md",
+                    )
+                    data_dir = os.path.join(
+                        self.crawler_output_dir,
+                        self.competition_name,
+                        "data",
+                    )
+                    outputs_ready = os.path.exists(overview_path) or os.path.isdir(data_dir)
+                    if outputs_ready:
+                        self.logger.warning(
+                            f"Crawler output idle for {idle_timeout}s with outputs present; terminating."
+                        )
+                        proc.terminate()
+                        try:
+                            proc.wait(timeout=10)
+                        except subprocess.TimeoutExpired:
+                            proc.kill()
+                            proc.wait(timeout=10)
+                        terminated_after_completion = True
+                        break
+                    self.logger.error(
+                        f"Crawler output idle for {idle_timeout}s without outputs; terminating."
+                    )
+                    proc.terminate()
+                    try:
+                        proc.wait(timeout=10)
+                    except subprocess.TimeoutExpired:
+                        proc.kill()
+                        proc.wait(timeout=10)
+                    break
 
                 if timeout is not None and (time.monotonic() - start_ts) > float(timeout):
                     self.logger.error(f"Crawler timed out after {timeout} seconds; terminating.")

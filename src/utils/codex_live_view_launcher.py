@@ -91,13 +91,22 @@ class CodexLiveViewLauncher:
     def enabled(self) -> bool:
         return self.cfg.enabled and self.cfg.backend.lower() not in ("off", "false", "0", "none", "")
 
-    def build_manual_command(self, *, label: str, jsonl_path: str, pid: Optional[int]) -> str:
+    def build_manual_command(
+        self,
+        *,
+        label: str,
+        jsonl_path: str,
+        pid: Optional[int],
+        include_cd: bool = True,
+    ) -> str:
         uv = shutil.which("uv") or "uv"
         viewer_args = self.cfg.to_viewer_args(label=label, jsonl_path=jsonl_path, pid=pid)
         # Render as a single command string for humans.
         parts = [uv, "run"] + viewer_args
         quoted = " ".join(shlex.quote(p) for p in parts)
-        return f"cd {shlex.quote(str(PROJECT_ROOT))} && {quoted}"
+        if include_cd:
+            return f"cd {shlex.quote(str(PROJECT_ROOT))} && {quoted}"
+        return quoted
 
     def launch(self, *, label: str, jsonl_path: str, pid: Optional[int]) -> bool:
         """

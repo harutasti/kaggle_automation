@@ -66,7 +66,6 @@ class ExperimentOrchestrator(BaseComponent):
 
         # Optional: spawn a separate terminal per WAA to follow Codex JSONL output.
         self._codex_live_view = CodexLiveViewLauncher(config, logger=self.logger)
-        self._live_view_manual_hint_shown = False
 
         # Dry-run marker prefix used by src/execution/wca_simulator.py
         self._dry_run_training_done_prefix = "DRYRUN_TRAINING_DONE_"
@@ -81,19 +80,20 @@ class ExperimentOrchestrator(BaseComponent):
         This is best-effort and must never break experiment execution.
         """
         try:
+            manual = self._codex_live_view.build_manual_command(
+                label=label,
+                jsonl_path=jsonl_path,
+                pid=pid,
+                include_cd=False,
+            )
+            self.logger.info(f"Live view command (run from repo root): {manual}")
+
             if not self._codex_live_view.enabled():
                 return
 
             launched = self._codex_live_view.launch(label=label, jsonl_path=jsonl_path, pid=pid)
             if not launched:
-                manual = self._codex_live_view.build_manual_command(label=label, jsonl_path=jsonl_path, pid=pid)
-                if not self._live_view_manual_hint_shown:
-                    self.logger.info(
-                        f"Live view not launched (label={label}). Run manually:\n  {manual}"
-                    )
-                    self._live_view_manual_hint_shown = True
-                else:
-                    self.logger.debug(f"Live view not launched (label={label}). Manual command: {manual}")
+                self.logger.debug(f"Live view not launched (label={label}).")
         except Exception as e:
             self.logger.debug(f"Live view spawn failed (ignored): {e}")
 

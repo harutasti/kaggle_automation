@@ -299,6 +299,10 @@ class MasterControllerDecisionUnit(BaseComponent):
 
                     if not last_analysis or not last_analysis.experiment_decisions:
                         self.logger.warning("No evolution decisions available. Running PA with evolution decisions...")
+                        if not self.user_confirm.confirm_pa_analysis(last_iteration, len(prior_results)):
+                            self.logger.info("User cancelled performance analysis. Stopping.")
+                            self.stop_reason = "User cancelled performance analysis"
+                            break
                         # Re-run PA with evolution decisions
                         # NOTE: Do not pass experiment_ids - let PA derive them from results
                         # to ensure consistency between prompt IDs and validation IDs
@@ -658,7 +662,9 @@ class MasterControllerDecisionUnit(BaseComponent):
                                 else:
                                     self.logger.warning(f"No submission file found for {result.experiment_id}")
                         else:
-                            self.logger.info("User skipped Kaggle submissions for this iteration")
+                            self.logger.info("User cancelled Kaggle submissions. Stopping.")
+                            self.stop_reason = "User cancelled Kaggle submissions"
+                            break
 
                     if submitted_refs:
                         self.run_state_manager.append_event(
@@ -716,8 +722,9 @@ class MasterControllerDecisionUnit(BaseComponent):
             else:
                 if iteration_results:
                     if not self.user_confirm.confirm_pa_analysis(self.current_iteration, len(iteration_results)):
-                        self.logger.info("User cancelled performance analysis. Skipping.")
-                        self.user_confirm.show_warning("Skipping performance analysis for this iteration")
+                        self.logger.info("User cancelled performance analysis. Stopping.")
+                        self.stop_reason = "User cancelled performance analysis"
+                        break
                     else:
                         # Use evolution decisions mode for PA
                         # NOTE: Do not pass experiment_ids - let PA derive them from results

@@ -6,9 +6,17 @@ import argparse
 import shutil
 import glob
 import json
+import sys
 from pathlib import Path
 from tqdm import tqdm
 from crawl4ai import AsyncWebCrawler, BrowserConfig, CrawlerRunConfig, CacheMode
+
+try:
+    # Ensure crawler prints flush promptly when invoked via subprocess.
+    sys.stdout.reconfigure(line_buffering=True)
+    sys.stderr.reconfigure(line_buffering=True)
+except Exception:
+    pass
 
 
 # --------------------------------------------------------------------------- #
@@ -456,9 +464,11 @@ async def crawl_discussion_page(
     """
     print(f"[discussion] thread {thread_id}: {url}")
 
+    # Discussions are dynamic and often never reach "networkidle" on Kaggle.
+    # Use DOMContentLoaded to avoid long hangs/timeouts.
     cfg = CrawlerRunConfig(
         cache_mode=CacheMode.BYPASS,
-        wait_until="networkidle",
+        wait_until="domcontentloaded",
         page_timeout=120_000,
         scan_full_page=True,
         simulate_user=True,
@@ -566,9 +576,10 @@ async def main():
         # 4. Discussions
         print("\n=== Crawling discussion threads (most-voted) ===")
         list_url = f"{base_url}/discussion?sort=votes"
+        # Discussion list page is also dynamic; avoid waiting for full network idle.
         list_cfg = CrawlerRunConfig(
             cache_mode=CacheMode.BYPASS,
-            wait_until="networkidle",
+            wait_until="domcontentloaded",
             page_timeout=60_000,
         )
 
