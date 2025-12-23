@@ -26,6 +26,7 @@ import uuid
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 
 from .codex_jsonl import write_codex_messages_file
+from .codex_live_view_launcher import CodexLiveViewLauncher
 
 class CodexMode(Enum):
     """Types of Codex executions"""
@@ -535,7 +536,8 @@ def execute_kse_hypothesis_generation(
     dry_run: bool = False,
     logger: Optional[logging.Logger] = None,
     resume_prompt: str | None = None,
-    run_label: str | None = None
+    run_label: str | None = None,
+    live_view_config: Optional[dict] = None
 ) -> CodexResult:
     """
     Execute KSE hypothesis generation using Codex.
@@ -548,6 +550,7 @@ def execute_kse_hypothesis_generation(
         timeout: Maximum execution time in seconds (default: 10 minutes)
         resume_prompt: Optional prompt for resume mode (uses `codex exec ... resume --last`)
         run_label: Optional label for differentiating multiple KSE runs (for logging/output naming)
+        live_view_config: Optional config dict for building live view follow commands
         logger: Optional logger instance
 
     Returns:
@@ -630,6 +633,12 @@ def execute_kse_hypothesis_generation(
             jsonl_path.write_text(raw_output, encoding="utf-8")
             logger.info(f"Saved JSONL output to {jsonl_path}")
             write_codex_messages_file(jsonl_path=jsonl_path)
+            _log_live_view_command(
+                live_view_config=live_view_config,
+                label=f"KSE-iter{iteration}",
+                jsonl_path=str(jsonl_path),
+                logger=logger,
+            )
 
         logger.info(f"KSE completed in {execution_time:.2f}s")
 
@@ -670,7 +679,8 @@ def execute_pa_analysis(
     dry_run: bool = False,
     logger: Optional[logging.Logger] = None,
     resume_prompt: str | None = None,
-    run_label: str | None = None
+    run_label: str | None = None,
+    live_view_config: Optional[dict] = None
 ) -> CodexResult:
     """
     Execute Performance Analysis using Codex.
@@ -681,6 +691,7 @@ def execute_pa_analysis(
         output_dir: Directory to save analysis report
         codex_responses_dir: Directory for JSONL output logs (e.g., experiment_run_dir/codex-responses)
         timeout: Maximum execution time in seconds (default: 5 minutes)
+        live_view_config: Optional config dict for building live view follow commands
         logger: Optional logger instance
 
     Returns:
@@ -835,6 +846,12 @@ Create two output files:
             jsonl_path.write_text(raw_output, encoding="utf-8")
             logger.info(f"Saved JSONL output to {jsonl_path}")
             write_codex_messages_file(jsonl_path=jsonl_path)
+            _log_live_view_command(
+                live_view_config=live_view_config,
+                label=f"PA-iter{iteration}",
+                jsonl_path=str(jsonl_path),
+                logger=logger,
+            )
 
         logger.info(f"PA completed in {execution_time:.2f}s")
 
@@ -992,6 +1009,23 @@ def _infer_run_dir(anchor_path: str | Path) -> Optional[Path]:
         if parent.name in {"worktrees", "hypotheses", "analysis", "results", "sessions", "codex-responses"}:
             return parent.parent
     return p if p.exists() else None
+
+
+def _log_live_view_command(
+    *,
+    live_view_config: Optional[dict],
+    label: str,
+    jsonl_path: str,
+    logger: Optional[logging.Logger],
+) -> None:
+    if not live_view_config or logger is None:
+        return
+    try:
+        launcher = CodexLiveViewLauncher(live_view_config, logger=logger)
+        manual = launcher.build_manual_command(label=label, jsonl_path=jsonl_path, pid=None)
+        logger.info(f"Live view command (run from repo root): {manual}")
+    except Exception:
+        return
 
 
 def _save_prompt_for_debug(

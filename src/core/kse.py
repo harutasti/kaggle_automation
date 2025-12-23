@@ -430,7 +430,8 @@ class KnowledgeStrategyEngine(BaseComponent):
                     timeout=self.codex_timeout,
                     logger=self.logger,
                     resume_prompt=resume_prompt,
-                    run_label=run_label
+                    run_label=run_label,
+                    live_view_config=self.config
                 )
             except Exception as e:
                 self.logger.error(f"Error calling Codex for KSE: {e}")
@@ -751,7 +752,8 @@ class KnowledgeStrategyEngine(BaseComponent):
                     timeout=self.codex_timeout,
                     logger=self.logger,
                     resume_prompt=resume_prompt,
-                    run_label=f"resume{attempt+1}"
+                    run_label=f"resume{attempt+1}",
+                    live_view_config=self.config
                 )
 
             remaining = self._find_remaining_placeholders(template_paths)

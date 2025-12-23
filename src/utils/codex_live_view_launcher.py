@@ -37,6 +37,7 @@ class CodexLiveViewConfig:
     viewer_from_end: bool = False
     viewer_timestamps: bool = False
     viewer_idle_exit_seconds: float = 3.0
+    viewer_theme: str = "light"
 
     def to_viewer_args(self, *, label: str, jsonl_path: str, pid: Optional[int]) -> list[str]:
         args: list[str] = [
@@ -54,6 +55,8 @@ class CodexLiveViewConfig:
             args.append("--from-end")
         if self.viewer_timestamps:
             args.append("--timestamps")
+        if self.viewer_theme and not any(str(arg).startswith("--theme") for arg in self.viewer_extra_args):
+            args.extend(["--theme", self.viewer_theme])
         args.extend(self.viewer_extra_args)
         return args
 
@@ -85,6 +88,7 @@ class CodexLiveViewLauncher:
             viewer_from_end=bool(cfg.get("viewer_from_end", False)),
             viewer_timestamps=bool(cfg.get("viewer_timestamps", False)),
             viewer_idle_exit_seconds=float(cfg.get("viewer_idle_exit_seconds", 3.0)),
+            viewer_theme=str(cfg.get("viewer_theme", cfg.get("theme", "light"))),
         )
         self._tmux_attach_hint_shown = False
 

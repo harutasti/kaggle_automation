@@ -29,6 +29,7 @@
     "backend": "tmux",
     "title_prefix": "AutoKaggle",
     "viewer_timestamps": true,
-    "viewer_idle_exit_seconds": 3.0
+    "viewer_idle_exit_seconds": 3.0,
+    "viewer_theme": "dark"
   }
 }

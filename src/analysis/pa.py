@@ -241,8 +241,10 @@ class PerformanceAnalyzer(BaseComponent):
                 iteration=iteration,
                 codex_responses_dir=codex_responses_dir,
                 timeout=self.config.get("pa_codex_timeout", 180),
+                logger=self.logger,
                 resume_prompt=resume_prompt,
-                run_label=run_label
+                run_label=run_label,
+                live_view_config=self.config
             )
 
             if not codex_result.success:
@@ -514,8 +516,10 @@ class PerformanceAnalyzer(BaseComponent):
             iteration=iteration,
             codex_responses_dir=codex_responses_dir,
             timeout=self.config.get("pa_codex_timeout", 300),  # Longer timeout for decisions
+            logger=self.logger,
             resume_prompt=prompt if iteration > 0 else None,
-            run_label="evolution"
+            run_label="evolution",
+            live_view_config=self.config
         )
 
         if not codex_result.success:
@@ -565,8 +569,10 @@ class PerformanceAnalyzer(BaseComponent):
             iteration=iteration,
             codex_responses_dir=codex_responses_dir,
             timeout=self.config.get("pa_codex_timeout", 180),
+            logger=self.logger,
             resume_prompt=retry_prompt,
-            run_label="decision_retry"
+            run_label="decision_retry",
+            live_view_config=self.config
         )
 
         if not codex_result.success:

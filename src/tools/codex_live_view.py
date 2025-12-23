@@ -32,7 +32,7 @@ from rich.text import Text
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 
 
-EVENT_STYLE: dict[str, str] = {
+LIGHT_EVENT_STYLE: dict[str, str] = {
     "thread.started": "dim",
     "turn.started": "bold bright_green",
     "turn.completed": "bold bright_green",
@@ -42,7 +42,7 @@ EVENT_STYLE: dict[str, str] = {
     "error": "bold bright_red",
 }
 
-ITEM_STYLE: dict[str, str] = {
+LIGHT_ITEM_STYLE: dict[str, str] = {
     "reasoning": "dim",
     "agent_message": "bold white",
     "command_execution": "bright_cyan",
@@ -51,10 +51,35 @@ ITEM_STYLE: dict[str, str] = {
     "web_search": "bright_blue",
 }
 
-FILE_CHANGE_KIND_STYLE: dict[str, str] = {
+LIGHT_FILE_CHANGE_KIND_STYLE: dict[str, str] = {
     "add": "green",
     "update": "yellow",
     "delete": "red",
+}
+
+DARK_EVENT_STYLE: dict[str, str] = {
+    "thread.started": "dim",
+    "turn.started": "bold bright_cyan",
+    "turn.completed": "bold bright_cyan",
+    "item.started": "bright_yellow",
+    "item.updated": "bright_yellow",
+    "item.completed": "bright_white",
+    "error": "bold bright_red",
+}
+
+DARK_ITEM_STYLE: dict[str, str] = {
+    "reasoning": "dim",
+    "agent_message": "bright_white",
+    "command_execution": "bright_cyan",
+    "file_change": "bright_magenta",
+    "todo_list": "bright_yellow",
+    "web_search": "bright_blue",
+}
+
+DARK_FILE_CHANGE_KIND_STYLE: dict[str, str] = {
+    "add": "bright_green",
+    "update": "bright_yellow",
+    "delete": "bright_red",
 }
 
 
@@ -101,10 +126,18 @@ class RenderConfig:
     max_command_output_chars: int = 12000
 
 
+@dataclass(frozen=True)
+class RenderTheme:
+    event_style: dict[str, str]
+    item_style: dict[str, str]
+    file_change_kind_style: dict[str, str]
+
+
 class JsonlRenderer:
-    def __init__(self, console: Console, config: RenderConfig):
+    def __init__(self, console: Console, config: RenderConfig, theme: RenderTheme):
         self.console = console
         self.config = config
+        self.theme = theme
         self._seen_turn_completed = False
 
     @property
@@ -125,16 +158,16 @@ class JsonlRenderer:
 
         if event_type == "error":
             msg = obj.get("message", "")
-            self.console.print(self._prefix_text(f"[error] {msg}", style=EVENT_STYLE["error"]))
+            self.console.print(self._prefix_text(f"[error] {msg}", style=self.theme.event_style["error"]))
             return
 
         if event_type == "thread.started":
             tid = obj.get("thread_id", "")
-            self.console.print(self._prefix_text(f"thread.started id={tid}", style=EVENT_STYLE["thread.started"]))
+            self.console.print(self._prefix_text(f"thread.started id={tid}", style=self.theme.event_style["thread.started"]))
             return
 
         if event_type == "turn.started":
-            self.console.print(self._prefix_text("turn.started", style=EVENT_STYLE["turn.started"]))
+            self.console.print(self._prefix_text("turn.started", style=self.theme.event_style["turn.started"]))
             return
 
         if event_type == "turn.completed":
@@ -146,7 +179,7 @@ class JsonlRenderer:
                     f" cached={usage.get('cached_input_tokens','?')}"
                     f" output={usage.get('output_tokens','?')}"
                 )
-            self.console.print(self._prefix_text(f"turn.completed{usage_str}", style=EVENT_STYLE["turn.completed"]))
+            self.console.print(self._prefix_text(f"turn.completed{usage_str}", style=self.theme.event_style["turn.completed"]))
             return
 
         if event_type.startswith("item.") and isinstance(obj.get("item"), dict):
@@ -155,14 +188,14 @@ class JsonlRenderer:
 
         # Fallback: print JSON in a compact form.
         self.console.print(
-            self._prefix_text(json.dumps(obj, ensure_ascii=False), style=EVENT_STYLE.get(event_type, "dim"))
+            self._prefix_text(json.dumps(obj, ensure_ascii=False), style=self.theme.event_style.get(event_type, "dim"))
         )
 
     def _render_item_event(self, event_type: str, item: Dict[str, Any]) -> None:
         item_type = item.get("type") or "unknown"
         item_id = item.get("id", "")
         status = item.get("status")
-        style = ITEM_STYLE.get(item_type, "white")
+        style = self.theme.item_style.get(item_type, "white")
 
         header = f"{event_type} {item_type}"
         if item_id:
@@ -224,7 +257,7 @@ class JsonlRenderer:
                         continue
                     kind = str(ch.get("kind", "change"))
                     path = str(ch.get("path", ""))
-                    kind_style = FILE_CHANGE_KIND_STYLE.get(kind, style)
+                    kind_style = self.theme.file_change_kind_style.get(kind, style)
                     self.console.print(self._prefix_text(f"  - {kind}: {path}", style=kind_style))
             return
 
@@ -379,6 +412,7 @@ def main() -> None:
     parser.add_argument("--max-text-chars", type=int, default=4000, help="Max chars for reasoning/agent text")
     parser.add_argument("--max-command-output-lines", type=int, default=80, help="Max lines for command output")
     parser.add_argument("--max-command-output-chars", type=int, default=12000, help="Max chars for command output")
+    parser.add_argument("--theme", type=str, default="light", choices=["light", "dark"], help="Color theme")
     args = parser.parse_args()
 
     console = Console()
@@ -392,7 +426,12 @@ def main() -> None:
         max_command_output_lines=args.max_command_output_lines,
         max_command_output_chars=args.max_command_output_chars,
     )
-    renderer = JsonlRenderer(console, cfg)
+    theme = (
+        RenderTheme(DARK_EVENT_STYLE, DARK_ITEM_STYLE, DARK_FILE_CHANGE_KIND_STYLE)
+        if args.theme == "dark"
+        else RenderTheme(LIGHT_EVENT_STYLE, LIGHT_ITEM_STYLE, LIGHT_FILE_CHANGE_KIND_STYLE)
+    )
+    renderer = JsonlRenderer(console, cfg, theme)
 
     if args.follow:
         follow_path = Path(args.follow)
@@ -440,4 +479,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-
