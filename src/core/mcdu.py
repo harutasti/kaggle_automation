@@ -1271,10 +1271,12 @@ class MasterControllerDecisionUnit(BaseComponent):
                     done_status = None
 
             status_entry = None
+            status_parse_error = None
             try:
-                status_entry = self.eo.session_manager.read_current_status(worktree_path)
+                status_entry, status_parse_error = self.eo.session_manager.read_current_status_with_error(worktree_path)
             except Exception:
                 status_entry = None
+                status_parse_error = None
 
             status_value = status_entry.status.value if status_entry else None
             done_success = done_status is not None and done_status.startswith("SUCCESS")
@@ -1282,6 +1284,49 @@ class MasterControllerDecisionUnit(BaseComponent):
             status_complete = status_value == SessionStatus.COMPLETE.value
             status_error = status_value == SessionStatus.ERROR.value
             status_running = status_value == SessionStatus.RUNNING.value
+
+            if status_parse_error:
+                if self.eo.has_codex_session(exp_id, worktree_path):
+                    if self.eo.can_attempt_resume(exp_id):
+                        override_prompt = self.eo._yaml_parse_error_prompt(status_parse_error)
+                        resumed = self.eo.resume_experiment(
+                            exp_id,
+                            worktree_path,
+                            reason="status_yaml_parse_error",
+                            resume_prompt_override=override_prompt,
+                        )
+                        if resumed:
+                            status_entry = self.eo.session_manager.read_current_status(worktree_path)
+                            status_value = status_entry.status.value if status_entry else None
+                            done_success = False
+                            if os.path.exists(done_path):
+                                with open(done_path, "r", encoding="utf-8") as f:
+                                    done_success = f.read().strip().startswith("SUCCESS")
+                            if done_success or status_value == SessionStatus.COMPLETE.value:
+                                self._collect_and_log_result(exp_id, worktree_path, iter_state, iteration_results)
+                            else:
+                                pending_resume.add(exp_id)
+                        else:
+                            if self.eo.can_attempt_resume(exp_id):
+                                pending_resume.add(exp_id)
+                            else:
+                                if not os.path.exists(done_path):
+                                    with open(done_path, "w", encoding="utf-8") as f:
+                                        f.write("RESUME_FAILURE")
+                                self._collect_and_log_result(exp_id, worktree_path, iter_state, iteration_results)
+                    else:
+                        if not os.path.exists(done_path):
+                            with open(done_path, "w", encoding="utf-8") as f:
+                                f.write("RESUME_FAILURE")
+                        self._collect_and_log_result(exp_id, worktree_path, iter_state, iteration_results)
+                else:
+                    # No Codex session - restart from scratch
+                    kind, obj = exp_map.get(exp_id, ("new", None))
+                    if kind == "continuation" and obj is not None:
+                        restart_continuations.append(obj)
+                    elif obj is not None:
+                        restart_hypotheses.append(obj)
+                continue
 
             # Completed successfully
             if done_success or status_complete:

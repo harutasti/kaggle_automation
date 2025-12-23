@@ -526,6 +526,7 @@ Please execute the experiment exactly as described above. Ensure you:
         completed_ids = []
         still_active_processes = {}
         sessions_needing_resume: List[Tuple[str, subprocess.Popen, str, Optional[str], str]] = []
+        sessions_needing_resume_override: List[Tuple[str, subprocess.Popen, str, str]] = []
 
         if not self.active_processes:
             return []
@@ -534,8 +535,10 @@ Please execute the experiment exactly as described above. Ensure you:
             done_file_path = os.path.join(worktree_path, f"DONE_{exp_id}")
 
             # 1. Read current status from experiment-status.yaml
+            current_status = None
+            status_parse_error = None
             try:
-                current_status = self.session_manager.read_current_status(worktree_path)
+                current_status, status_parse_error = self.session_manager.read_current_status_with_error(worktree_path)
             except Exception as e:
                 self.logger.error(f"Status file corrupted for {exp_id}: {e}")
                 # Create error marker for debugging
@@ -543,10 +546,27 @@ Please execute the experiment exactly as described above. Ensure you:
                 try:
                     with open(error_marker, 'w') as f:
                         f.write(f"Status file read error: {e}")
-                except:
+                except Exception:
                     pass  # Don't fail on marker creation
                 current_status = None
                 self.logger.warning(f"Falling back to DONE file check for {exp_id} due to status file error")
+
+            if status_parse_error:
+                self.logger.error(f"Status file parse error for {exp_id}: {status_parse_error}")
+                error_marker = os.path.join(worktree_path, f"STATUS_ERROR_{exp_id}")
+                try:
+                    with open(error_marker, 'w') as f:
+                        f.write(f"Status file parse error: {status_parse_error}")
+                except Exception:
+                    pass
+
+                if process.poll() is None:
+                    still_active_processes[exp_id] = (process, worktree_path)
+                else:
+                    sessions_needing_resume_override.append(
+                        (exp_id, process, worktree_path, status_parse_error)
+                    )
+                continue
 
             # 2. Check status-based completion
             if current_status:
@@ -657,7 +677,60 @@ Please execute the experiment exactly as described above. Ensure you:
                 still_active_processes[exp_id] = (process, worktree_path)
                 self._completion_grace_started_at.pop(exp_id, None)
 
-        # 4. Handle sessions needing resume
+        # 4. Handle sessions needing resume (explicit prompt override)
+        for exp_id, process, worktree_path, error_msg in sessions_needing_resume_override:
+            if not self._can_attempt_resume(exp_id):
+                self.logger.error(f"Resume attempt limit reached for {exp_id}. Marking as failed.")
+                done_file_path = os.path.join(worktree_path, f"DONE_{exp_id}")
+                with open(done_file_path, 'w') as f:
+                    f.write("RESUME_FAILURE")
+                completed_ids.append(exp_id)
+                continue
+
+            override_prompt = self._yaml_parse_error_prompt(error_msg)
+            resumed = self._trigger_resume(
+                exp_id,
+                process,
+                worktree_path,
+                reason="status_yaml_parse_error",
+                resume_prompt_override=override_prompt,
+            )
+            if resumed:
+                done_file_path = os.path.join(worktree_path, f"DONE_{exp_id}")
+                try:
+                    current_status = self.session_manager.read_current_status(worktree_path)
+                except Exception:
+                    current_status = None
+
+                if os.path.exists(done_file_path):
+                    self.logger.info(f"Resume completed and experiment {exp_id} finished successfully")
+                    completed_ids.append(exp_id)
+                elif current_status and current_status.status == SessionStatus.COMPLETE:
+                    self._finalize_completed_experiment(exp_id, process, worktree_path)
+                    completed_ids.append(exp_id)
+                elif current_status and current_status.status == SessionStatus.ERROR:
+                    self._handle_error_experiment(exp_id, process, worktree_path, current_status)
+                    completed_ids.append(exp_id)
+                else:
+                    self.logger.warning(f"Resume completed for {exp_id} but experiment not finished. Continuing to monitor.")
+                    still_active_processes[exp_id] = (process, worktree_path)
+
+                self._resume_retry_count[exp_id] = 0
+            else:
+                retry_count = self._get_resume_attempts(exp_id)
+                limit = int(self.config.get("waa_resume_max_attempts", 2))
+                if retry_count < limit:
+                    still_active_processes[exp_id] = (process, worktree_path)
+                    self.logger.warning(f"Resume failed for {exp_id} (attempt {retry_count}/{limit}). Will retry next check.")
+                else:
+                    self.logger.error(f"Resume failed for {exp_id} after {retry_count} attempts. Marking as failed.")
+                    done_file_path = os.path.join(worktree_path, f"DONE_{exp_id}")
+                    with open(done_file_path, 'w') as f:
+                        f.write("RESUME_FAILURE")
+                    completed_ids.append(exp_id)
+                    self._resume_retry_count.pop(exp_id, None)
+
+        # 5. Handle sessions needing resume
         # Note: execute_codex_resume() is BLOCKING - it waits for the resumed session to complete
         for exp_id, process, worktree_path, prompt_kind, proc_summary in sessions_needing_resume:
             if not self._can_attempt_resume(exp_id):
@@ -771,6 +844,12 @@ Please execute the experiment exactly as described above. Ensure you:
         done_file_path = os.path.join(worktree_path, f"DONE_{exp_id}")
         with open(done_file_path, 'w') as f:
             f.write("UNEXPECTED_FAILURE")
+
+    def _yaml_parse_error_prompt(self, error_message: Optional[str]) -> str:
+        base = "The YAML file structure is broken. Please fix the file."
+        if error_message:
+            return f"{base} ERROR: {error_message}"
+        return base
 
     def _path_within(self, base: str, path: str) -> bool:
         """Return True if path is within base (best-effort)."""
@@ -1039,6 +1118,7 @@ Please execute the experiment exactly as described above. Ensure you:
         reason: Optional[str] = None,
         resume_prompt_kind: Optional[str] = None,
         process_summary: Optional[str] = None,
+        resume_prompt_override: Optional[str] = None,
     ) -> bool:
         """Trigger Codex resume using `codex resume --last`."""
         if not self._can_attempt_resume(exp_id):
@@ -1115,21 +1195,25 @@ Please execute the experiment exactly as described above. Ensure you:
             # Import resume function
             from ..utils.codex_executor import execute_codex_resume, build_resume_prompt
 
-            if resume_prompt_kind is None:
-                if reason and reason in ("pending_error", "error_or_failure"):
-                    resume_prompt_kind = "completed_error"
-                else:
-                    resume_prompt_kind = "no_process_found"
+            if resume_prompt_override:
+                resume_prompt = resume_prompt_override
+                self.logger.info(f"Using explicit resume prompt override for {exp_id}")
+            else:
+                if resume_prompt_kind is None:
+                    if reason and reason in ("pending_error", "error_or_failure"):
+                        resume_prompt_kind = "completed_error"
+                    else:
+                        resume_prompt_kind = "no_process_found"
 
-            resume_prompt = build_resume_prompt(
-                exp_id,
-                exit_code,
-                training_log_tail,
-                prompt_kind=resume_prompt_kind,
-                prompts_dir=self.config.get("prompts_dir", "prompts"),
-                worktree_path=worktree_path,
-                process_summary=process_summary,
-            )
+                resume_prompt = build_resume_prompt(
+                    exp_id,
+                    exit_code,
+                    training_log_tail,
+                    prompt_kind=resume_prompt_kind,
+                    prompts_dir=self.config.get("prompts_dir", "prompts"),
+                    worktree_path=worktree_path,
+                    process_summary=process_summary,
+                )
 
             # Use `codex resume --last` to continue the session
             codex_responses_dir = os.path.join(self.experiment_run_dir, "codex-responses", "WAA")
@@ -1199,6 +1283,7 @@ Please execute the experiment exactly as described above. Ensure you:
         reason: Optional[str] = None,
         resume_prompt_kind: Optional[str] = None,
         process_summary: Optional[str] = None,
+        resume_prompt_override: Optional[str] = None,
     ) -> bool:
         """Resume an experiment without a tracked process (blocking)."""
         return self._trigger_resume(
@@ -1208,6 +1293,7 @@ Please execute the experiment exactly as described above. Ensure you:
             reason=reason,
             resume_prompt_kind=resume_prompt_kind,
             process_summary=process_summary,
+            resume_prompt_override=resume_prompt_override,
         )
 
     def cleanup_worktree(self, exp_id: str, worktree_path: str):

@@ -121,7 +121,9 @@ class SessionManager:
             'statuses': [initial_entry]
         }
 
-        self._write_yaml(status_path, content)
+        # Use the simple writer to enforce two-space indent for list entries.
+        # This matches the WAA prompt append format and avoids YAML corruption.
+        self._simple_yaml_write(status_path, content)
         self.logger.info(f"Created status file: {status_path}")
 
         # Initialize session tracking
@@ -170,6 +172,47 @@ class SessionManager:
         except Exception as e:
             self.logger.error(f"Failed to read status file {status_path}: {e}")
             return None
+
+    def read_current_status_with_error(
+        self, worktree_path: str
+    ) -> tuple[Optional[StatusEntry], Optional[str]]:
+        """
+        Read the latest status and surface YAML parse errors separately.
+
+        Returns:
+            (StatusEntry or None, parse_error_message or None)
+        """
+        status_path = Path(worktree_path) / STATUS_FILE_NAME
+
+        if not status_path.exists():
+            return None, None
+
+        try:
+            content, parse_error = self._read_yaml_with_error(status_path)
+            if parse_error:
+                return None, parse_error
+            if not content or 'statuses' not in content:
+                return None, None
+
+            statuses = content['statuses']
+            if not statuses:
+                return None, None
+
+            last_entry = statuses[-1]
+            return StatusEntry(
+                timestamp=self._parse_timestamp(last_entry.get('timestamp', '')),
+                status=SessionStatus(last_entry.get('status', 'IDLE')),
+                message=last_entry.get('message', ''),
+                expected_duration_minutes=last_entry.get('expected_duration_minutes'),
+                model_files=last_entry.get('model_files', []),
+                output_files=last_entry.get('output_files', []),
+                error_type=last_entry.get('error_type'),
+                recovery_suggestion=last_entry.get('recovery_suggestion'),
+                metadata=last_entry.get('metadata', {})
+            ), None
+        except Exception as e:
+            self.logger.error(f"Failed to read status file {status_path}: {e}")
+            return None, None
 
     def append_status(
         self,
@@ -380,32 +423,30 @@ class SessionManager:
         return status in (SessionStatus.COMPLETE, SessionStatus.ERROR)
 
     def _read_yaml(self, path: Path, max_retries: int = MAX_STATUS_READ_RETRIES) -> Dict[str, Any]:
-        """Read YAML file with fallback for missing PyYAML and retry logic.
+        """Read YAML file with fallback for missing PyYAML and retry logic."""
+        content, _ = self._read_yaml_with_error(path, max_retries=max_retries)
+        return content
 
-        Args:
-            path: Path to the YAML file
-            max_retries: Maximum number of retries for corrupted/incomplete files
-
-        Returns:
-            Parsed YAML content or empty dict on failure
-        """
-        last_error = None
+    def _read_yaml_with_error(
+        self, path: Path, max_retries: int = MAX_STATUS_READ_RETRIES
+    ) -> tuple[Dict[str, Any], Optional[str]]:
+        """Read YAML file and return parse error message if parsing failed."""
+        last_error: Optional[Exception] = None
 
         for attempt in range(max_retries):
             try:
                 if yaml is not None:
                     with open(path, 'r') as f:
-                        return yaml.safe_load(f) or {}
-                else:
-                    # Simple fallback parser for our specific format
-                    return self._simple_yaml_parse(path)
+                        return yaml.safe_load(f) or {}, None
+                # Simple fallback parser for our specific format
+                return self._simple_yaml_parse(path), None
             except FileNotFoundError:
                 # File doesn't exist - don't retry, this is expected
-                return {}
+                return {}, None
             except PermissionError as e:
                 # Permission issues - don't retry
                 self.logger.error(f"Permission denied reading {path}: {e}")
-                return {}
+                return {}, None
             except Exception as e:
                 # Parse errors or other issues - retry with backoff
                 error_name = type(e).__name__
@@ -430,14 +471,14 @@ class SessionManager:
                 else:
                     # Non-parse errors - don't retry
                     self.logger.error(f"Error reading {path}: {e}")
-                    return {}
+                    return {}, None
 
         # All retries exhausted
         self.logger.error(
             f"Failed to parse YAML {path} after {max_retries} attempts. "
             f"Last error: {last_error}. File may be corrupted."
         )
-        return {}
+        return {}, str(last_error) if last_error is not None else None
 
     def _write_yaml(self, path: Path, content: Dict[str, Any]) -> None:
         """Write YAML file with fallback for missing PyYAML."""
@@ -458,26 +499,28 @@ class SessionManager:
         with open(path, 'r') as f:
             for line in f:
                 line = line.rstrip()
+                stripped = line.lstrip()
 
                 # Skip empty lines and comments
-                if not line or line.startswith('#'):
+                if not stripped or stripped.startswith('#'):
                     continue
 
                 # Top-level key
-                if line.startswith('experiment_id:'):
-                    result['experiment_id'] = line.split(':', 1)[1].strip().strip('"\'')
-                elif line.startswith('created_at:'):
-                    result['created_at'] = line.split(':', 1)[1].strip().strip('"\'')
-                elif line == 'statuses:':
+                if stripped.startswith('experiment_id:'):
+                    result['experiment_id'] = stripped.split(':', 1)[1].strip().strip('"\'')
+                elif stripped.startswith('created_at:'):
+                    result['created_at'] = stripped.split(':', 1)[1].strip().strip('"\'')
+                elif stripped == 'statuses:':
                     continue
-                elif line.startswith('- timestamp:'):
+                elif stripped.startswith('- timestamp:'):
                     if current_entry:
                         result['statuses'].append(current_entry)
-                    current_entry = {'timestamp': line.split(':', 1)[1].strip().strip('"\'').split(':', 1)[1].strip().strip('"\'')}
-                elif line.startswith('  status:'):
-                    current_entry['status'] = line.split(':', 1)[1].strip().strip('"\'')
-                elif line.startswith('  message:'):
-                    current_entry['message'] = line.split(':', 1)[1].strip().strip('"\'')
+                    ts = stripped.split(':', 1)[1].strip().strip('"\'')
+                    current_entry = {'timestamp': ts}
+                elif stripped.startswith('status:'):
+                    current_entry['status'] = stripped.split(':', 1)[1].strip().strip('"\'')
+                elif stripped.startswith('message:'):
+                    current_entry['message'] = stripped.split(':', 1)[1].strip().strip('"\'')
 
         if current_entry:
             result['statuses'].append(current_entry)
