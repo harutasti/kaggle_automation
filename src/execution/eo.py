@@ -826,7 +826,7 @@ Please execute the experiment exactly as described above. Ensure you:
 
         done_file_path = os.path.join(worktree_path, f"DONE_{exp_id}")
         with open(done_file_path, 'w') as f:
-            f.write(f"ERROR: {status.message}")
+            f.write(f"FAILURE: {status.message}")
 
         self.logger.error(f"Experiment {exp_id} failed with error: {status.message}")
 

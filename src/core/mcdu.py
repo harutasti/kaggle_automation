@@ -13,6 +13,7 @@ from ..execution.eo import ExperimentOrchestrator
 from ..analysis.rad import ResultAggregatorDatabase
 from ..analysis.pa import PerformanceAnalyzer
 from ..utils.user_interaction import UserConfirmation
+from ..utils.done_status import read_done_status
 from ..execution.session_manager import SessionStatus
 from ..execution.run_state import (
     RunStateManager,
@@ -478,26 +479,151 @@ class MasterControllerDecisionUnit(BaseComponent):
                             continue
 
                         done_path = os.path.join(worktree_path, f"DONE_{exp_id}")
-                        done_status = None
-                        if os.path.exists(done_path):
-                            try:
-                                with open(done_path, "r", encoding="utf-8") as f:
-                                    done_status = f.read().strip()
-                            except Exception:
-                                done_status = None
+                        done_info = read_done_status(done_path)
 
                         status_entry = None
+                        status_parse_error = None
                         try:
-                            status_entry = self.eo.session_manager.read_current_status(worktree_path)
+                            status_entry, status_parse_error = self.eo.session_manager.read_current_status_with_error(worktree_path)
                         except Exception:
                             status_entry = None
+                            status_parse_error = None
 
                         status_value = status_entry.status.value if status_entry else None
-                        done_success = done_status is not None and done_status.startswith("SUCCESS")
-                        done_failure = done_status is not None and not done_success
+                        done_success = done_info.ok is True
+                        done_failure = done_info.ok is False
                         status_complete = status_value == SessionStatus.COMPLETE.value
                         status_error = status_value == SessionStatus.ERROR.value
                         status_running = status_value == SessionStatus.RUNNING.value
+
+                        if status_parse_error:
+                            if self.eo.has_codex_session(exp_id, worktree_path):
+                                if self.eo.can_attempt_resume(exp_id):
+                                    override_prompt = self.eo._yaml_parse_error_prompt(status_parse_error)
+                                    resumed = self.eo.resume_experiment(
+                                        exp_id,
+                                        worktree_path,
+                                        reason="status_yaml_parse_error",
+                                        resume_prompt_override=override_prompt,
+                                    )
+                                    if resumed:
+                                        status_entry = self.eo.session_manager.read_current_status(worktree_path)
+                                        status_value = status_entry.status.value if status_entry else None
+                                        done_success = read_done_status(done_path).ok is True
+                                        if done_success or status_value == SessionStatus.COMPLETE.value:
+                                            self._collect_and_log_result(exp_id, worktree_path, iter_state, iteration_results)
+                                            pending_resume.discard(exp_id)
+                                        else:
+                                            pending_resume.add(exp_id)
+                                    else:
+                                        if self.eo.can_attempt_resume(exp_id):
+                                            pending_resume.add(exp_id)
+                                        else:
+                                            if not os.path.exists(done_path):
+                                                with open(done_path, "w", encoding="utf-8") as f:
+                                                    f.write("RESUME_FAILURE")
+                                            self._collect_and_log_result(exp_id, worktree_path, iter_state, iteration_results)
+                                            pending_resume.discard(exp_id)
+                                else:
+                                    if not os.path.exists(done_path):
+                                        with open(done_path, "w", encoding="utf-8") as f:
+                                            f.write("RESUME_FAILURE")
+                                    self._collect_and_log_result(exp_id, worktree_path, iter_state, iteration_results)
+                                    pending_resume.discard(exp_id)
+                            else:
+                                # No Codex session remains; restart when possible.
+                                pending_resume.discard(exp_id)
+                                continuation = self.all_continuation_hypotheses.get(exp_id)
+                                hypothesis = self.all_hypotheses.get(exp_id)
+                                if continuation:
+                                    cont_result = self.eo.launch_continuation_experiments([continuation], total_waas=1)
+                                    if continuation.continuation_id in cont_result.get("launched", []):
+                                        running_experiments.add(continuation.continuation_id)
+                                        self.run_state_manager.append_event(
+                                            EVENT_WAA_LAUNCHED,
+                                            iteration=self.current_iteration,
+                                            payload={"experiments": [{
+                                                "experiment_id": continuation.continuation_id,
+                                                "worktree_path": self.eo.get_worktree_path(continuation.continuation_id) or continuation.worktree_path,
+                                                "kind": "continuation"
+                                            }]}
+                                        )
+                                elif hypothesis:
+                                    new_result = self.eo.launch_experiments([hypothesis], total_waas=1)
+                                    if hypothesis.experiment_id in new_result.get("launched", []):
+                                        running_experiments.add(hypothesis.experiment_id)
+                                        self.run_state_manager.append_event(
+                                            EVENT_WAA_LAUNCHED,
+                                            iteration=self.current_iteration,
+                                            payload={"experiments": [{
+                                                "experiment_id": hypothesis.experiment_id,
+                                                "worktree_path": self.eo.get_worktree_path(hypothesis.experiment_id) or "",
+                                                "kind": "new"
+                                            }]}
+                                        )
+                            continue
+
+                        if done_failure or status_error:
+                            if self.eo.has_codex_session(exp_id, worktree_path):
+                                if self.eo.can_attempt_resume(exp_id):
+                                    resumed = self.eo.resume_experiment(
+                                        exp_id,
+                                        worktree_path,
+                                        reason="pending_error",
+                                        resume_prompt_kind="completed_error",
+                                    )
+                                    if resumed:
+                                        status_entry = self.eo.session_manager.read_current_status(worktree_path)
+                                        status_value = status_entry.status.value if status_entry else None
+                                        done_success = read_done_status(done_path).ok is True
+                                        if done_success or status_value == SessionStatus.COMPLETE.value:
+                                            self._collect_and_log_result(exp_id, worktree_path, iter_state, iteration_results)
+                                            pending_resume.discard(exp_id)
+                                    else:
+                                        if not self.eo.can_attempt_resume(exp_id):
+                                            if not os.path.exists(done_path):
+                                                with open(done_path, "w", encoding="utf-8") as f:
+                                                    f.write("RESUME_FAILURE")
+                                            self._collect_and_log_result(exp_id, worktree_path, iter_state, iteration_results)
+                                            pending_resume.discard(exp_id)
+                                else:
+                                    if not os.path.exists(done_path):
+                                        with open(done_path, "w", encoding="utf-8") as f:
+                                            f.write("RESUME_FAILURE")
+                                    self._collect_and_log_result(exp_id, worktree_path, iter_state, iteration_results)
+                                    pending_resume.discard(exp_id)
+                            else:
+                                # No Codex session remains; restart from scratch when possible.
+                                pending_resume.discard(exp_id)
+                                continuation = self.all_continuation_hypotheses.get(exp_id)
+                                hypothesis = self.all_hypotheses.get(exp_id)
+                                if continuation:
+                                    cont_result = self.eo.launch_continuation_experiments([continuation], total_waas=1)
+                                    if continuation.continuation_id in cont_result.get("launched", []):
+                                        running_experiments.add(continuation.continuation_id)
+                                        self.run_state_manager.append_event(
+                                            EVENT_WAA_LAUNCHED,
+                                            iteration=self.current_iteration,
+                                            payload={"experiments": [{
+                                                "experiment_id": continuation.continuation_id,
+                                                "worktree_path": self.eo.get_worktree_path(continuation.continuation_id) or continuation.worktree_path,
+                                                "kind": "continuation"
+                                            }]}
+                                        )
+                                elif hypothesis:
+                                    new_result = self.eo.launch_experiments([hypothesis], total_waas=1)
+                                    if hypothesis.experiment_id in new_result.get("launched", []):
+                                        running_experiments.add(hypothesis.experiment_id)
+                                        self.run_state_manager.append_event(
+                                            EVENT_WAA_LAUNCHED,
+                                            iteration=self.current_iteration,
+                                            payload={"experiments": [{
+                                                "experiment_id": hypothesis.experiment_id,
+                                                "worktree_path": self.eo.get_worktree_path(hypothesis.experiment_id) or "",
+                                                "kind": "new"
+                                            }]}
+                                        )
+                            continue
 
                         if done_success or status_complete:
                             self._collect_and_log_result(exp_id, worktree_path, iter_state, iteration_results)
@@ -537,39 +663,6 @@ class MasterControllerDecisionUnit(BaseComponent):
                                     )
                             continue
 
-                        if done_failure or status_error:
-                            if self.eo.can_attempt_resume(exp_id):
-                                resumed = self.eo.resume_experiment(
-                                    exp_id,
-                                    worktree_path,
-                                    reason="pending_error",
-                                    resume_prompt_kind="completed_error",
-                                )
-                                if resumed:
-                                    status_entry = self.eo.session_manager.read_current_status(worktree_path)
-                                    status_value = status_entry.status.value if status_entry else None
-                                    done_success = False
-                                    if os.path.exists(done_path):
-                                        with open(done_path, "r", encoding="utf-8") as f:
-                                            done_success = f.read().strip().startswith("SUCCESS")
-                                    if done_success or status_value == SessionStatus.COMPLETE.value:
-                                        self._collect_and_log_result(exp_id, worktree_path, iter_state, iteration_results)
-                                        pending_resume.discard(exp_id)
-                                else:
-                                    if not self.eo.can_attempt_resume(exp_id):
-                                        if not os.path.exists(done_path):
-                                            with open(done_path, "w", encoding="utf-8") as f:
-                                                f.write("RESUME_FAILURE")
-                                        self._collect_and_log_result(exp_id, worktree_path, iter_state, iteration_results)
-                                        pending_resume.discard(exp_id)
-                            else:
-                                if not os.path.exists(done_path):
-                                    with open(done_path, "w", encoding="utf-8") as f:
-                                        f.write("RESUME_FAILURE")
-                                self._collect_and_log_result(exp_id, worktree_path, iter_state, iteration_results)
-                                pending_resume.discard(exp_id)
-                            continue
-
                         if status_running:
                             state, prompt_kind, proc_summary = self.eo.inspect_background_processes(exp_id, worktree_path)
                             if state in ("completed", "no_processes"):
@@ -584,10 +677,7 @@ class MasterControllerDecisionUnit(BaseComponent):
                                     if resumed:
                                         status_entry = self.eo.session_manager.read_current_status(worktree_path)
                                         status_value = status_entry.status.value if status_entry else None
-                                        done_success = False
-                                        if os.path.exists(done_path):
-                                            with open(done_path, "r", encoding="utf-8") as f:
-                                                done_success = f.read().strip().startswith("SUCCESS")
+                                        done_success = read_done_status(done_path).ok is True
                                         if done_success or status_value == SessionStatus.COMPLETE.value:
                                             self._collect_and_log_result(exp_id, worktree_path, iter_state, iteration_results)
                                             pending_resume.discard(exp_id)
@@ -606,10 +696,7 @@ class MasterControllerDecisionUnit(BaseComponent):
                             if resumed:
                                 status_entry = self.eo.session_manager.read_current_status(worktree_path)
                                 status_value = status_entry.status.value if status_entry else None
-                                done_success = False
-                                if os.path.exists(done_path):
-                                    with open(done_path, "r", encoding="utf-8") as f:
-                                        done_success = f.read().strip().startswith("SUCCESS")
+                                done_success = read_done_status(done_path).ok is True
                                 if done_success or status_value == SessionStatus.COMPLETE.value:
                                     self._collect_and_log_result(exp_id, worktree_path, iter_state, iteration_results)
                                     pending_resume.discard(exp_id)
@@ -808,14 +895,18 @@ class MasterControllerDecisionUnit(BaseComponent):
             self.logger.info(self.stop_reason)
             return True
 
-        if self.score_threshold and self.best_score_overall:
+        if self.score_threshold is not None and self.best_score_overall is not None:
             # Check threshold based on metric direction
+            higher_is_better = self._metric_higher_is_better()
             threshold_met = (
-                self.best_score_overall >= self.score_threshold if self.pa.higher_is_better
+                self.best_score_overall >= self.score_threshold if higher_is_better
                 else self.best_score_overall <= self.score_threshold
             )
             if threshold_met:
-                self.stop_reason = f"Achieved score threshold ({self.score_threshold}) with score {self.best_score_overall:.4f}"
+                self.stop_reason = (
+                    f"Achieved score threshold ({self.score_threshold}) "
+                    f"with score {self.best_score_overall:.4f}"
+                )
                 self.logger.info(self.stop_reason)
                 return True
 
@@ -827,6 +918,12 @@ class MasterControllerDecisionUnit(BaseComponent):
         # TODO: Add budget/time-based conditions
 
         return False
+
+    def _metric_higher_is_better(self) -> bool:
+        """Determine metric direction, preferring competition info when available."""
+        if self.competition_info is not None and self.competition_info.higher_is_better is not None:
+            return bool(self.competition_info.higher_is_better)
+        return bool(getattr(self.pa, "higher_is_better", True))
 
     def _generate_hypotheses_for_iteration(self) -> List[ExperimentHypothesis]:
         """Generate hypotheses for the current iteration."""
@@ -864,7 +961,7 @@ class MasterControllerDecisionUnit(BaseComponent):
             is_improvement = False
             if self.best_score_overall is None:
                 is_improvement = True
-            elif self.pa.higher_is_better:
+            elif self._metric_higher_is_better():
                 is_improvement = current_best_iter_score > self.best_score_overall
             else:
                 is_improvement = current_best_iter_score < self.best_score_overall
@@ -1262,13 +1359,7 @@ class MasterControllerDecisionUnit(BaseComponent):
                 continue
 
             done_path = os.path.join(worktree_path, f"DONE_{exp_id}")
-            done_status = None
-            if os.path.exists(done_path):
-                try:
-                    with open(done_path, "r", encoding="utf-8") as f:
-                        done_status = f.read().strip()
-                except Exception:
-                    done_status = None
+            done_info = read_done_status(done_path)
 
             status_entry = None
             status_parse_error = None
@@ -1279,8 +1370,8 @@ class MasterControllerDecisionUnit(BaseComponent):
                 status_parse_error = None
 
             status_value = status_entry.status.value if status_entry else None
-            done_success = done_status is not None and done_status.startswith("SUCCESS")
-            done_failure = done_status is not None and not done_success
+            done_success = done_info.ok is True
+            done_failure = done_info.ok is False
             status_complete = status_value == SessionStatus.COMPLETE.value
             status_error = status_value == SessionStatus.ERROR.value
             status_running = status_value == SessionStatus.RUNNING.value
@@ -1298,10 +1389,48 @@ class MasterControllerDecisionUnit(BaseComponent):
                         if resumed:
                             status_entry = self.eo.session_manager.read_current_status(worktree_path)
                             status_value = status_entry.status.value if status_entry else None
-                            done_success = False
-                            if os.path.exists(done_path):
-                                with open(done_path, "r", encoding="utf-8") as f:
-                                    done_success = f.read().strip().startswith("SUCCESS")
+                            done_success = read_done_status(done_path).ok is True
+                            if done_success or status_value == SessionStatus.COMPLETE.value:
+                                self._collect_and_log_result(exp_id, worktree_path, iter_state, iteration_results)
+                            else:
+                                pending_resume.add(exp_id)
+                        else:
+                            if self.eo.can_attempt_resume(exp_id):
+                                pending_resume.add(exp_id)
+                            else:
+                                if not os.path.exists(done_path):
+                                    with open(done_path, "w", encoding="utf-8") as f:
+                                        f.write("RESUME_FAILURE")
+                                self._collect_and_log_result(exp_id, worktree_path, iter_state, iteration_results)
+                    else:
+                        if not os.path.exists(done_path):
+                            with open(done_path, "w", encoding="utf-8") as f:
+                                f.write("RESUME_FAILURE")
+                        self._collect_and_log_result(exp_id, worktree_path, iter_state, iteration_results)
+                else:
+                    # No Codex session - restart from scratch
+                    kind, obj = exp_map.get(exp_id, ("new", None))
+                    if kind == "continuation" and obj is not None:
+                        restart_continuations.append(obj)
+                    elif obj is not None:
+                        restart_hypotheses.append(obj)
+                continue
+
+            # Failure or error: attempt resume if possible
+            if done_failure or status_error:
+                if self.eo.has_codex_session(exp_id, worktree_path):
+                    if self.eo.can_attempt_resume(exp_id):
+                        resumed = self.eo.resume_experiment(
+                            exp_id,
+                            worktree_path,
+                            reason="error_or_failure",
+                            resume_prompt_kind="completed_error",
+                        )
+                        if resumed:
+                            # Check completion after resume
+                            status_entry = self.eo.session_manager.read_current_status(worktree_path)
+                            status_value = status_entry.status.value if status_entry else None
+                            done_success = read_done_status(done_path).ok is True
                             if done_success or status_value == SessionStatus.COMPLETE.value:
                                 self._collect_and_log_result(exp_id, worktree_path, iter_state, iteration_results)
                             else:
@@ -1333,50 +1462,6 @@ class MasterControllerDecisionUnit(BaseComponent):
                 self._collect_and_log_result(exp_id, worktree_path, iter_state, iteration_results)
                 continue
 
-            # Failure or error: attempt resume if possible
-            if done_failure or status_error:
-                if self.eo.has_codex_session(exp_id, worktree_path):
-                    if self.eo.can_attempt_resume(exp_id):
-                        resumed = self.eo.resume_experiment(
-                            exp_id,
-                            worktree_path,
-                            reason="error_or_failure",
-                            resume_prompt_kind="completed_error",
-                        )
-                        if resumed:
-                            # Check completion after resume
-                            status_entry = self.eo.session_manager.read_current_status(worktree_path)
-                            status_value = status_entry.status.value if status_entry else None
-                            done_success = False
-                            if os.path.exists(done_path):
-                                with open(done_path, "r", encoding="utf-8") as f:
-                                    done_success = f.read().strip().startswith("SUCCESS")
-                            if done_success or status_value == SessionStatus.COMPLETE.value:
-                                self._collect_and_log_result(exp_id, worktree_path, iter_state, iteration_results)
-                            else:
-                                pending_resume.add(exp_id)
-                        else:
-                            if self.eo.can_attempt_resume(exp_id):
-                                pending_resume.add(exp_id)
-                            else:
-                                if not os.path.exists(done_path):
-                                    with open(done_path, "w", encoding="utf-8") as f:
-                                        f.write("RESUME_FAILURE")
-                                self._collect_and_log_result(exp_id, worktree_path, iter_state, iteration_results)
-                    else:
-                        if not os.path.exists(done_path):
-                            with open(done_path, "w", encoding="utf-8") as f:
-                                f.write("RESUME_FAILURE")
-                        self._collect_and_log_result(exp_id, worktree_path, iter_state, iteration_results)
-                else:
-                    # No Codex session - restart from scratch
-                    kind, obj = exp_map.get(exp_id, ("new", None))
-                    if kind == "continuation" and obj is not None:
-                        restart_continuations.append(obj)
-                    elif obj is not None:
-                        restart_hypotheses.append(obj)
-                continue
-
             # RUNNING without DONE: resume immediately
             if status_running:
                 if self.eo.has_codex_session(exp_id, worktree_path):
@@ -1395,10 +1480,7 @@ class MasterControllerDecisionUnit(BaseComponent):
                         if resumed:
                             status_entry = self.eo.session_manager.read_current_status(worktree_path)
                             status_value = status_entry.status.value if status_entry else None
-                            done_success = False
-                            if os.path.exists(done_path):
-                                with open(done_path, "r", encoding="utf-8") as f:
-                                    done_success = f.read().strip().startswith("SUCCESS")
+                            done_success = read_done_status(done_path).ok is True
                             if done_success or status_value == SessionStatus.COMPLETE.value:
                                 self._collect_and_log_result(exp_id, worktree_path, iter_state, iteration_results)
                             else:
@@ -1437,10 +1519,7 @@ class MasterControllerDecisionUnit(BaseComponent):
                     if resumed:
                         status_entry = self.eo.session_manager.read_current_status(worktree_path)
                         status_value = status_entry.status.value if status_entry else None
-                        done_success = False
-                        if os.path.exists(done_path):
-                            with open(done_path, "r", encoding="utf-8") as f:
-                                done_success = f.read().strip().startswith("SUCCESS")
+                        done_success = read_done_status(done_path).ok is True
                         if done_success or status_value == SessionStatus.COMPLETE.value:
                             self._collect_and_log_result(exp_id, worktree_path, iter_state, iteration_results)
                         else:
@@ -1712,7 +1791,7 @@ class MasterControllerDecisionUnit(BaseComponent):
                 self.logger.info(f"  {orig_id} -> {cont_id}")
 
         if self.best_score_overall is not None:
-            direction = "higher is better" if self.pa.higher_is_better else "lower is better"
+            direction = "higher is better" if self._metric_higher_is_better() else "lower is better"
             self.logger.info(f"Overall Best Score: {self.best_score_overall:.4f} ({direction})")
             self.logger.info(f"Best Experiment ID: {self.best_experiment_id_overall}")
             # Display details of best result (from RAD)

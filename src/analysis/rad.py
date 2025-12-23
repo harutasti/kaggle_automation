@@ -8,6 +8,7 @@ from typing import List, Dict, Optional
 from ..core.base_component import BaseComponent
 from ..data_models import ExperimentResult, ExperimentHypothesis
 from ..utils.file_utils import ensure_dir, read_json, copy_file, move_file, write_json, read_markdown
+from ..utils.done_status import read_done_status
 from ..utils.codex_jsonl import write_codex_messages_file
 
 class ResultAggregatorDatabase(BaseComponent):
@@ -131,28 +132,33 @@ class ResultAggregatorDatabase(BaseComponent):
         waa_log_path = os.path.join(worktree_path, f"waa_{exp_id}.log")
         error_log_path = os.path.join(worktree_path, f"ERROR_{exp_id}.log")  # In case the WAA exits abnormally
 
-        status = "UNKNOWN"
-        if os.path.exists(done_file_path):
-             with open(done_file_path, 'r') as f:
-                 status = f.read().strip()
+        done_info = read_done_status(done_file_path)
+        if done_info.ok is True:
+            status = "SUCCESS"
+        elif done_info.ok is False:
+            status = done_info.normalized
+        elif done_info.normalized == "MISSING":
+            self.logger.warning(f"DONE file not found for {exp_id}. Assuming failure.")
+            status = "FAILURE_NO_DONE_FILE"
         else:
-             self.logger.warning(f"DONE file not found for {exp_id}. Assuming failure.")
-             status = "FAILURE_NO_DONE_FILE"
+            status = f"FAILURE_{done_info.normalized}"
 
 
         result_data = read_json(result_json_path)
         score = self._extract_score(result_data) if result_data else None
         error_message = None
         if status != "SUCCESS":
-             if os.path.exists(error_log_path):
-                  error_message = read_markdown(error_log_path)  # Read error log content
-             elif status == "UNEXPECTED_FAILURE":
-                  error_message = "WAA process terminated unexpectedly."
-             elif status == "FAILURE_NO_DONE_FILE":
-                  error_message = "DONE file was not created."
-             else:  # status == "FAILURE" from DONE file
-                  # Could inspect WAA logs for details (omitted)
-                  error_message = "Simulated WAA failure or error during execution."
+            if os.path.exists(error_log_path):
+                error_message = read_markdown(error_log_path)  # Read error log content
+            elif done_info.detail:
+                error_message = done_info.detail
+            elif status == "UNEXPECTED_FAILURE":
+                error_message = "WAA process terminated unexpectedly."
+            elif status == "FAILURE_NO_DONE_FILE":
+                error_message = "DONE file was not created."
+            else:
+                # Could inspect WAA logs for details (omitted)
+                error_message = "Simulated WAA failure or error during execution."
 
 
         # Copy result files and build list
