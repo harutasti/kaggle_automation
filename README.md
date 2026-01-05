@@ -206,6 +206,9 @@ Configs are JSON files in `config/`. The most important keys:
 - `experiment_pyproject_path`: per-experiment dependency spec copied into each worktree
 - `kaggle_score_wait_timeout_seconds`: how long to poll Kaggle for official scores after submissions
 - `kaggle_score_poll_interval_seconds`: polling interval for checking submission scores
+- `slack_notify_on_iteration_end`: send a Slack message after each iteration (default false)
+- `slack_webhook_url`: Slack webhook URL (optional; prefer env var)
+- `slack_webhook_env`: env var name for webhook (default `SLACK_WEBHOOK_URL`)
 
 ## Competition Profiles and Knowledge
 
@@ -231,7 +234,9 @@ Example:
   "stop_condition": { "no_improvement_iterations": 2 },
   "simulation_mode": true,
   "use_crawler": true,
-  "analyze_dataset": true
+  "analyze_dataset": true,
+  "slack_notify_on_iteration_end": true,
+  "slack_webhook_env": "SLACK_WEBHOOK_URL"
 }
 ```
 

@@ -16,6 +16,7 @@ from ..analysis.pa import PerformanceAnalyzer
 from ..utils.user_interaction import UserConfirmation
 from ..utils.done_status import read_done_status
 from ..utils.competition_knowledge import CompetitionKnowledgeStore
+from ..utils.slack_notifier import notify_iteration_end
 from ..execution.session_manager import SessionStatus
 from ..execution.run_state import (
     RunStateManager,
@@ -967,6 +968,23 @@ class MasterControllerDecisionUnit(BaseComponent):
             # 2g. Update overall best and check improvement
             if analysis_result:
                 self._update_overall_best(analysis_result)
+
+            if not iter_state.complete:
+                experiment_run_dir = self.config.get(
+                    "experiment_run_dir",
+                    self.config.get("experiments_base_dir", "./experiments"),
+                )
+                notify_iteration_end(
+                    config=self.config,
+                    competition_name=self.competition_info.name if self.competition_info else "unknown",
+                    iteration=self.current_iteration,
+                    run_id=os.path.basename(os.path.abspath(experiment_run_dir)),
+                    results=iteration_results,
+                    higher_is_better=self._metric_higher_is_better(),
+                    analysis_result=analysis_result,
+                    official_scores=official_scores,
+                    logger=self.logger,
+                )
 
             self.run_state_manager.append_event(
                 EVENT_ITERATION_COMPLETE,
