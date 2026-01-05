@@ -1,4 +1,4 @@
-# AutoKaggle Resume (Background Training Error)
+# AutoKaggle Resume (Background Run Error)
 
 Experiment ID: {{EXPERIMENT_ID}}
 Worktree: {{WORKTREE_PATH}}
@@ -7,7 +7,7 @@ Exit Code: {{EXIT_CODE}}
 Background process summary:
 {{BACKGROUND_PROCESSES}}
 
-Training Log (last 10KB):
+Run Log (last 10KB):
 ```
 {{TRAINING_LOG_TAIL}}
 ```

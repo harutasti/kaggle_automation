@@ -192,6 +192,12 @@ Configs are JSON files in `config/`. The most important keys:
 - `kaggle_competition_name`: Kaggle competition slug (e.g., `titanic`)
 - `max_iterations`: max loop iterations
 - `wca_per_iteration`: number of parallel worker agents (WAAs)
+- `submit_each_iteration`: if `false`, skip per-iteration Kaggle submissions (final best submission still allowed)
+- `max_submissions_per_iteration`: cap Kaggle submissions per iteration (top-N by local score)
+- `include_historical_results`: if `true`, load prior-run results for KSE prompt context
+- `historical_results_max_runs`: max number of prior run directories to scan (default 3)
+- `historical_results_limit`: cap total historical results injected into prompts (default 200)
+- `historical_results_include_failures`: include failures in historical context (default true)
 - `stop_condition`:
   - `score_threshold` (optional)
   - `no_improvement_iterations`
@@ -200,6 +206,20 @@ Configs are JSON files in `config/`. The most important keys:
 - `experiment_pyproject_path`: per-experiment dependency spec copied into each worktree
 - `kaggle_score_wait_timeout_seconds`: how long to poll Kaggle for official scores after submissions
 - `kaggle_score_poll_interval_seconds`: polling interval for checking submission scores
+
+## Competition Profiles and Knowledge
+
+AutoKaggle can load competition-specific guidance and persist top-performing results for reuse:
+
+- `competitions/<slug>/profile.yaml` (optional): guidance injected into KSE/WAA prompts
+- `competitions/<slug>/knowledge/knowledge.json`: auto-updated top results and parameters
+- `competitions/<slug>/knowledge/solutions/`: copied submission CSVs for warm-starting
+
+Config keys:
+- `competition_profiles_dir`: base dir for profiles (default `competitions`)
+- `competition_profile_path`: explicit profile path (overrides default)
+- `competition_knowledge_dir`: base dir for knowledge storage (default `competitions`)
+- `competition_knowledge_top_k`: number of top results to retain (default 5)
 
 Example:
 

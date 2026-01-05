@@ -24,7 +24,7 @@ Your analysis quality directly determines:
 ## Critical Requirements
 
 - **Official/public scores are PRIMARY TRUTH**
-- **CV scores are SECONDARY** (useful for stability, not ranking)
+- **Local scores are SECONDARY** (useful for stability, not ranking)
 - **Every claim must cite specific experiment IDs and scores**
 - **Every recommendation must have expected impact quantified**
 
@@ -33,7 +33,7 @@ Your analysis quality directly determines:
 ## Inputs (Read Fully)
 
 ### WAA Results (Official Scores)
-Contains: Experiment results with official/public leaderboard scores and CV metrics
+Contains: Experiment results with official/public leaderboard scores and local metrics
 <<WAA_RESULTS>>
 
 ---
@@ -49,14 +49,14 @@ Produce ONE markdown document with these exact sections:
 ### 2. MICRO ANALYSIS
 - **Success Patterns**: What worked, WHY it works, evidence (exp_ids, scores)
 - **Failure Patterns**: Root causes (not just symptoms), mitigation, retry decision
-- **Feature Importance**: Consensus across successful experiments
-- **Hyperparameter Insights**: Optimal ranges with WHY explanations
-- **Overfitting Analysis**: Evidence-based assessment
+- **Operator Effectiveness**: Which move operators or phases helped most
+- **Parameter Insights**: Effective ranges for key search parameters
+- **Stability Analysis**: Variance across seeds/restarts and sensitivity
 
 ### 3. WHY ANALYSIS
 - WHY did the best experiment outperform others? (mechanism)
 - WHY did the worst experiment fail? (mechanism)
-- WHY is there a CV-to-official gap (if any)?
+- WHY is there a local-to-official gap (if any)?
 
 ### 4. RECOMMENDATIONS
 - **HIGH PRIORITY (Exploit)**: 3-5 approaches with expected impact, ordered by value
@@ -84,7 +84,7 @@ Produce ONE markdown document with these exact sections:
 
 ## Emphasis
 
-- **Be specific**: Parameter ranges, feature choices, validation setups—not generic advice
+- **Be specific**: Operators, schedules, constraints—not generic advice
 - **Be quantitative**: Cite scores, calculate improvements, estimate impacts
 - **Be critical**: Challenge claims, demand evidence
 - **Be actionable**: Every recommendation should be implementable

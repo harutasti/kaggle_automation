@@ -2,7 +2,7 @@
 
 ## Overview
 - Competition: {{COMPETITION_NAME}}
-- Goal / target definition: {{COMPETITION_OBJECTIVE}}
+- Goal / objective: {{COMPETITION_OBJECTIVE}}
 - Evaluation metric: {{EVALUATION_METRIC}}
 - Metric direction: {{METRIC_DIRECTION}} ({{METRIC_DIRECTION_EXPLANATION}})
 - Key deadlines or iteration cadence: {{DEADLINES_AND_CADENCE}}
@@ -12,14 +12,15 @@
 - External data / pretraining policy: {{EXTERNAL_DATA_POLICY}}
 - Hardware/runtime limits or notebook constraints: {{HARDWARE_LIMITS}}
 - Disallowed techniques or pitfalls called out by organizers: {{DISALLOWED_ITEMS}}
+- Mandatory validation rule: Use official constraints/geometry; proxies may only prune and must be rechecked before DONE
 
-## Dataset Summary
-- Primary training files and shapes: {{TRAINING_FILES}}
-- Target variable and type: {{TARGET_AND_TYPE}}
-- Feature types (numeric/categorical/text/image/time-series/etc.): {{FEATURE_TYPES}}
+## Data / Problem Summary
+- Primary files and shapes: {{TRAINING_FILES}}
+- Target or objective definition: {{TARGET_AND_TYPE}}
+- Data types / structure (numeric/categorical/text/graph/etc.): {{FEATURE_TYPES}}
 - Missing data and quality issues: {{MISSING_DATA}}
-- Leakage risks / splits provided by organizers: {{LEAKAGE_AND_SPLITS}}
-- Class/target balance observations: {{CLASS_BALANCE}}
+- Feasibility constraints / invalid solution risks: {{LEAKAGE_AND_SPLITS}}
+- Balance or distribution observations: {{CLASS_BALANCE}}
 
 ---
 
@@ -51,9 +52,9 @@ Top insights extracted:
 
 ---
 
-## Global Validation & Experiment Expectations
-- Preferred validation scheme and justification: {{VALIDATION_SCHEME}}
-- Train/val/test handling (including any time-based or group-aware splits): {{DATA_HANDLING_NOTES}}
+## Global Evaluation & Experiment Expectations
+- Preferred evaluation scheme and justification: {{VALIDATION_SCHEME}}
+- Data handling notes (splits, leakage controls, feasibility checks): {{DATA_HANDLING_NOTES}}
 - Baseline/benchmark references (public LB baselines, starter notebooks): {{BASELINES_AND_REFERENCES}}
 - Expected score ceiling or target ranges: {{EXPECTED_SCORE_RANGE}}
 - Reproducibility and random seed policy: {{REPRODUCIBILITY_POLICY}}
@@ -70,18 +71,18 @@ Top insights extracted:
 
 This iteration's experiments MUST collectively cover:
 
-### Model Families Assigned
+### Heuristic Families Assigned
 {{MODEL_FAMILIES_LIST}}
 
-### Feature Strategies Assigned
+### Operator / Move Strategies Assigned
 {{FEATURE_STRATEGIES_LIST}}
 
 ### Complexity Distribution
 {{COMPLEXITY_DISTRIBUTION}}
 
 ### Diversity Matrix
-| Experiment ID | Model Family | Feature Strategy | Complexity | Unique Element |
-|---------------|--------------|------------------|------------|----------------|
+| Experiment ID | Heuristic Family | Operator Strategy | Complexity | Unique Element |
+|---------------|------------------|-------------------|------------|----------------|
 {{DIVERSITY_MATRIX_ROWS}}
 
 **Note**: Each WAA should verify their experiment differs from others in at least 2 dimensions.

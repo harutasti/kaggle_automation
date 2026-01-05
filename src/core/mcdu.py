@@ -4,6 +4,7 @@ import time
 import json
 import sys
 import datetime
+from dataclasses import replace
 from typing import Dict, List, Optional, Any
 
 from .base_component import BaseComponent
@@ -14,6 +15,7 @@ from ..analysis.rad import ResultAggregatorDatabase
 from ..analysis.pa import PerformanceAnalyzer
 from ..utils.user_interaction import UserConfirmation
 from ..utils.done_status import read_done_status
+from ..utils.competition_knowledge import CompetitionKnowledgeStore
 from ..execution.session_manager import SessionStatus
 from ..execution.run_state import (
     RunStateManager,
@@ -62,6 +64,14 @@ class MasterControllerDecisionUnit(BaseComponent):
         self.eo = ExperimentOrchestrator(self.config, run_state_manager=self.run_state_manager)
         self.rad = ResultAggregatorDatabase(self.config)
         self.pa = PerformanceAnalyzer(self.config)
+        knowledge_dir = self.config.get("competition_knowledge_dir", "competitions")
+        knowledge_top_k = self.config.get("competition_knowledge_top_k", 5)
+        self.knowledge_store = CompetitionKnowledgeStore(
+            self.config.get("kaggle_competition_name"),
+            base_dir=knowledge_dir,
+            top_k=knowledge_top_k,
+            logger=self.logger,
+        )
 
         # State variables
         self.current_iteration = 0
@@ -83,10 +93,18 @@ class MasterControllerDecisionUnit(BaseComponent):
         self.continuation_map: Dict[str, str] = {}  # {continuation_id: original_exp_id} for lineage tracking
         self.all_continuation_hypotheses: Dict[str, ContinuationHypothesis] = {}  # {continuation_id: hypothesis}
 
+        # Optional: historical results from prior runs (for KSE context only).
+        self.historical_results: List[ExperimentResult] = []
+        self.historical_runs_loaded: List[str] = []
+
         # Load stop conditions
         stop_config = self.config.get("stop_condition", {})
         self.score_threshold = stop_config.get("score_threshold")
         self.no_improvement_threshold = stop_config.get("no_improvement_iterations", 3)
+
+        self._load_historical_results()
+        if self.historical_results:
+            self.kse.set_historical_results(self.historical_results)
 
 
     def run_main_loop(self):
@@ -712,6 +730,16 @@ class MasterControllerDecisionUnit(BaseComponent):
             # ================== Common: Submit to Kaggle ==================
             # 2e. Submit successful experiments to Kaggle and get official scores
             successful_results = [r for r in iteration_results if r.status == "SUCCESS" and r.score is not None]
+            iteration_submissions_enabled = self.config.get("submit_each_iteration", True)
+            if isinstance(iteration_submissions_enabled, str):
+                iteration_submissions_enabled = iteration_submissions_enabled.strip().lower() not in (
+                    "false",
+                    "0",
+                    "no",
+                    "off",
+                )
+            else:
+                iteration_submissions_enabled = bool(iteration_submissions_enabled)
 
             # Dry-run (simulation_mode) must not submit artifacts to Kaggle.
             if self.config.get("simulation_mode", False):
@@ -729,101 +757,171 @@ class MasterControllerDecisionUnit(BaseComponent):
                     payload={"official_scores": {}}
                 )
             else:
-                if not successful_results and not iter_state.kaggle_scores_collected:
-                    # Nothing to submit; mark Kaggle steps as complete.
-                    self.run_state_manager.append_event(
-                        EVENT_KAGGLE_SUBMISSION_COMPLETE,
-                        iteration=self.current_iteration,
-                        payload={"submitted_refs": {}}
-                    )
-                    self.run_state_manager.append_event(
-                        EVENT_KAGGLE_SCORES_COLLECTED,
-                        iteration=self.current_iteration,
-                        payload={"official_scores": {}}
-                    )
-                elif iter_state.kaggle_scores_collected:
-                    official_scores = dict(iter_state.official_scores)
-                    self.logger.info("Resume: official scores already collected; skipping Kaggle polling.")
-                else:
-                    submitted_refs: Dict[str, int] = {}
-                    if iter_state.kaggle_submitted and iter_state.submitted_refs:
-                        submitted_refs = dict(iter_state.submitted_refs)
-                        self.logger.info("Resume: reusing prior Kaggle submission refs.")
-                    elif successful_results:
-                        if self.user_confirm.confirm_iteration_submissions(
-                            self.current_iteration,
-                            [r.experiment_id for r in successful_results]
-                        ):
-                            self.logger.info(f"Submitting {len(successful_results)} successful experiments to Kaggle")
-                            for result in successful_results:
-                                submission_file = self._find_submission_file(result)
-                                if submission_file:
-                                    if self.kim.submit_predictions(
-                                        submission_file,
-                                        f"Iter {self.current_iteration} - {result.experiment_id}"
-                                    ):
-                                        if self.kim.last_submission_ref is not None:
-                                            submitted_refs[result.experiment_id] = int(self.kim.last_submission_ref)
-                                        else:
-                                            self.logger.warning(
-                                                f"Submission succeeded for {result.experiment_id} but no ref was captured; "
-                                                "skipping score polling for this submission."
-                                            )
-                                    else:
-                                        self.logger.error(f"Failed to submit {result.experiment_id}")
-                                else:
-                                    self.logger.warning(f"No submission file found for {result.experiment_id}")
-                        else:
-                            self.logger.info("User cancelled Kaggle submissions. Stopping.")
-                            self.stop_reason = "User cancelled Kaggle submissions"
-                            break
-
-                    if submitted_refs:
+                if not iteration_submissions_enabled:
+                    if successful_results:
+                        self.logger.info(
+                            "Iteration submissions disabled by config; skipping Kaggle submissions for this iteration."
+                        )
+                    official_scores = dict(iter_state.official_scores) if iter_state.official_scores else {}
+                    submitted_refs = dict(iter_state.submitted_refs) if iter_state.submitted_refs else {}
+                    if not iter_state.kaggle_submitted:
                         self.run_state_manager.append_event(
                             EVENT_KAGGLE_SUBMISSION_COMPLETE,
                             iteration=self.current_iteration,
                             payload={"submitted_refs": submitted_refs}
                         )
-
-                        wait_timeout = int(self.config.get("kaggle_score_wait_timeout_seconds", 300))
-                        poll_interval = self.config.get("kaggle_score_poll_interval_seconds", 10)
-                        try:
-                            poll_interval = float(poll_interval)
-                        except Exception:
-                            poll_interval = 10.0
-                        if poll_interval <= 0:
-                            poll_interval = 10.0
-
-                        self.logger.info(
-                            f"Polling Kaggle for official scores (count={len(submitted_refs)}, "
-                            f"timeout={wait_timeout}s, interval={poll_interval}s)..."
-                        )
-
-                        start = time.time()
-                        pending: Dict[str, int] = dict(submitted_refs)
-                        while pending and (time.time() - start) < wait_timeout:
-                            for exp_id, ref in list(pending.items()):
-                                score_result = self.kim.get_submission_score_once(submission_ref=ref)
-                                if score_result and score_result.get("score") is not None:
-                                    official_scores[exp_id] = score_result["score"]
-                                    self.logger.info(f"Official score for {exp_id}: {score_result['score']}")
-                                    pending.pop(exp_id, None)
-
-                            if pending:
-                                time.sleep(poll_interval)
-
-                        for exp_id, ref in pending.items():
-                            self.logger.warning(f"Could not get official score for {exp_id} (ref={ref})")
-
+                    if not iter_state.kaggle_scores_collected:
                         self.run_state_manager.append_event(
                             EVENT_KAGGLE_SCORES_COLLECTED,
                             iteration=self.current_iteration,
                             payload={"official_scores": official_scores}
                         )
+                else:
+                    max_submissions = self.config.get("max_submissions_per_iteration")
+                    if max_submissions is not None:
+                        try:
+                            max_submissions = int(max_submissions)
+                        except (TypeError, ValueError):
+                            self.logger.warning(
+                                "Invalid max_submissions_per_iteration value: %r (ignoring)",
+                                max_submissions,
+                            )
+                            max_submissions = None
+
+                    if max_submissions and max_submissions > 0 and len(successful_results) > max_submissions:
+                        higher_is_better = self._metric_higher_is_better()
+                        sorted_results = sorted(
+                            successful_results,
+                            key=lambda r: r.score,
+                            reverse=higher_is_better,
+                        )
+                        selected = sorted_results[:max_submissions]
+                        skipped = sorted_results[max_submissions:]
+                        direction = "higher is better" if higher_is_better else "lower is better"
+                        self.logger.info(
+                            "Limiting Kaggle submissions to top %d results by score (%s).",
+                            max_submissions,
+                            direction,
+                        )
+                        self.logger.info(
+                            "Selected for submission: %s",
+                            ", ".join(f"{r.experiment_id}({r.score})" for r in selected),
+                        )
+                        self.logger.info(
+                            "Skipped for submission: %s",
+                            ", ".join(f"{r.experiment_id}({r.score})" for r in skipped),
+                        )
+                        successful_results = selected
+
+                    if not successful_results and not iter_state.kaggle_scores_collected:
+                        # Nothing to submit; mark Kaggle steps as complete.
+                        self.run_state_manager.append_event(
+                            EVENT_KAGGLE_SUBMISSION_COMPLETE,
+                            iteration=self.current_iteration,
+                            payload={"submitted_refs": {}}
+                        )
+                        self.run_state_manager.append_event(
+                            EVENT_KAGGLE_SCORES_COLLECTED,
+                            iteration=self.current_iteration,
+                            payload={"official_scores": {}}
+                        )
+                    elif iter_state.kaggle_scores_collected:
+                        official_scores = dict(iter_state.official_scores)
+                        self.logger.info("Resume: official scores already collected; skipping Kaggle polling.")
+                    else:
+                        submitted_refs: Dict[str, int] = {}
+                        if iter_state.kaggle_submitted and iter_state.submitted_refs:
+                            submitted_refs = dict(iter_state.submitted_refs)
+                            self.logger.info("Resume: reusing prior Kaggle submission refs.")
+                        elif successful_results:
+                            if self.user_confirm.confirm_iteration_submissions(
+                                self.current_iteration,
+                                [r.experiment_id for r in successful_results]
+                            ):
+                                self.logger.info(f"Submitting {len(successful_results)} successful experiments to Kaggle")
+                                for result in successful_results:
+                                    submission_file = self._find_submission_file(result)
+                                    if submission_file:
+                                        if self.kim.submit_predictions(
+                                            submission_file,
+                                            f"Iter {self.current_iteration} - {result.experiment_id}"
+                                        ):
+                                            if self.kim.last_submission_ref is not None:
+                                                submitted_refs[result.experiment_id] = int(self.kim.last_submission_ref)
+                                            else:
+                                                self.logger.warning(
+                                                    f"Submission succeeded for {result.experiment_id} but no ref was captured; "
+                                                    "skipping score polling for this submission."
+                                                )
+                                        else:
+                                            self.logger.error(f"Failed to submit {result.experiment_id}")
+                                    else:
+                                        self.logger.warning(f"No submission file found for {result.experiment_id}")
+                            else:
+                                self.logger.info("User cancelled Kaggle submissions. Stopping.")
+                                self.stop_reason = "User cancelled Kaggle submissions"
+                                break
+
+                        if submitted_refs:
+                            self.run_state_manager.append_event(
+                                EVENT_KAGGLE_SUBMISSION_COMPLETE,
+                                iteration=self.current_iteration,
+                                payload={"submitted_refs": submitted_refs}
+                            )
+
+                            wait_timeout = int(self.config.get("kaggle_score_wait_timeout_seconds", 300))
+                            poll_interval = self.config.get("kaggle_score_poll_interval_seconds", 10)
+                            try:
+                                poll_interval = float(poll_interval)
+                            except Exception:
+                                poll_interval = 10.0
+                            if poll_interval <= 0:
+                                poll_interval = 10.0
+
+                            self.logger.info(
+                                f"Polling Kaggle for official scores (count={len(submitted_refs)}, "
+                                f"timeout={wait_timeout}s, interval={poll_interval}s)..."
+                            )
+
+                            start = time.time()
+                            pending: Dict[str, int] = dict(submitted_refs)
+                            while pending and (time.time() - start) < wait_timeout:
+                                for exp_id, ref in list(pending.items()):
+                                    score_result = self.kim.get_submission_score_once(submission_ref=ref)
+                                    if score_result and score_result.get("score") is not None:
+                                        official_scores[exp_id] = score_result["score"]
+                                        self.logger.info(f"Official score for {exp_id}: {score_result['score']}")
+                                        pending.pop(exp_id, None)
+
+                                if pending:
+                                    time.sleep(poll_interval)
+
+                            for exp_id, ref in pending.items():
+                                self.logger.warning(f"Could not get official score for {exp_id} (ref={ref})")
+
+                            self.run_state_manager.append_event(
+                                EVENT_KAGGLE_SCORES_COLLECTED,
+                                iteration=self.current_iteration,
+                                payload={"official_scores": official_scores}
+                            )
 
             # ================== Common: Performance Analysis ==================
             # 2f. Performance analysis with evolution decisions
             self._log_waa_results_to_terminal(iteration_results, official_scores)
+
+            if iteration_results:
+                experiment_run_dir = self.config.get(
+                    "experiment_run_dir",
+                    self.config.get("experiments_base_dir", "./experiments"),
+                )
+                results_base_dir = os.path.join(experiment_run_dir, "results")
+                self.knowledge_store.update_with_results(
+                    iteration_results,
+                    experiment_run_dir=experiment_run_dir,
+                    results_base_dir=results_base_dir,
+                    official_scores=official_scores,
+                    higher_is_better=self._metric_higher_is_better(),
+                )
 
             analysis_result = None
             if iter_state.pa_done and iter_state.analysis_result:
@@ -924,6 +1022,95 @@ class MasterControllerDecisionUnit(BaseComponent):
         if self.competition_info is not None and self.competition_info.higher_is_better is not None:
             return bool(self.competition_info.higher_is_better)
         return bool(getattr(self.pa, "higher_is_better", True))
+
+    def _load_historical_results(self) -> None:
+        """Optionally load results from prior runs for KSE prompt context."""
+        include_history = self.config.get("include_historical_results", False)
+        if isinstance(include_history, str):
+            include_history = include_history.strip().lower() not in ("false", "0", "no", "off")
+        else:
+            include_history = bool(include_history)
+
+        if not include_history:
+            return
+
+        competition_name = self.config.get("kaggle_competition_name")
+        if not competition_name:
+            return
+
+        base_dir = self.config.get("experiments_base_dir", "./experiments")
+        comp_dir = os.path.join(base_dir, competition_name)
+        if not os.path.isdir(comp_dir):
+            return
+
+        current_run_dir = os.path.abspath(self.config.get("experiment_run_dir", ""))
+        max_runs = self.config.get("historical_results_max_runs", 3)
+        max_results = self.config.get("historical_results_limit", 200)
+        include_failures = self.config.get("historical_results_include_failures", True)
+        if isinstance(include_failures, str):
+            include_failures = include_failures.strip().lower() not in ("false", "0", "no", "off")
+        else:
+            include_failures = bool(include_failures)
+
+        try:
+            max_runs = int(max_runs) if max_runs is not None else None
+        except (TypeError, ValueError):
+            max_runs = 3
+        try:
+            max_results = int(max_results) if max_results is not None else None
+        except (TypeError, ValueError):
+            max_results = 200
+
+        if max_runs is not None and max_runs <= 0:
+            return
+        if max_results is not None and max_results <= 0:
+            return
+
+        run_dirs = [
+            os.path.join(comp_dir, entry)
+            for entry in os.listdir(comp_dir)
+            if os.path.isdir(os.path.join(comp_dir, entry))
+        ]
+        run_dirs.sort(reverse=True)
+
+        for run_dir in run_dirs:
+            if current_run_dir and os.path.abspath(run_dir) == current_run_dir:
+                continue
+
+            manifest_path = os.path.join(run_dir, "results", "results_manifest.json")
+            if not os.path.exists(manifest_path):
+                continue
+
+            results = ResultAggregatorDatabase.load_results_from_manifest(manifest_path, logger=self.logger)
+            if not include_failures:
+                results = [r for r in results if r.status == "SUCCESS" and r.score is not None]
+
+            if not results:
+                continue
+
+            run_label = os.path.basename(run_dir)
+            for res in results:
+                hist_id = f"{run_label}/{res.experiment_id}"
+                hist_strategy = f"{res.strategy_name} [historical]"
+                self.historical_results.append(
+                    replace(res, experiment_id=hist_id, strategy_name=hist_strategy)
+                )
+                if max_results and len(self.historical_results) >= max_results:
+                    break
+
+            self.historical_runs_loaded.append(run_label)
+
+            if max_results and len(self.historical_results) >= max_results:
+                break
+            if max_runs and len(self.historical_runs_loaded) >= max_runs:
+                break
+
+        if self.historical_results:
+            self.logger.info(
+                "Loaded %d historical results from %d prior runs.",
+                len(self.historical_results),
+                len(self.historical_runs_loaded),
+            )
 
     def _generate_hypotheses_for_iteration(self) -> List[ExperimentHypothesis]:
         """Generate hypotheses for the current iteration."""

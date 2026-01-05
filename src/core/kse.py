@@ -19,6 +19,8 @@ from ..utils.system_specs import SystemSpecsDetector
 from ..utils.codex_executor import CodexMode, execute_codex, CodexResult
 from ..utils.gpu_allocator import GPUAllocator
 from ..utils.dry_run import stable_hash_int, write_jsonl_agent_message
+from ..utils.competition_profile import load_competition_profile
+from ..utils.competition_knowledge import CompetitionKnowledgeStore
 
 class KnowledgeStrategyEngine(BaseComponent):
     def __init__(self, config: dict):
@@ -54,6 +56,39 @@ class KnowledgeStrategyEngine(BaseComponent):
 
         # Number of WAAs per iteration (for GPU allocation calculations)
         self.wca_per_iteration = config.get("wca_per_iteration", 3)
+
+        # Optional historical results (prior runs) for prompt context
+        self.historical_results: List[ExperimentResult] = []
+
+        self.competition_profile = None
+        self.knowledge_store = None
+        if self.competition_name:
+            profile_dir = config.get("competition_profiles_dir", "competitions")
+            profile_path = config.get("competition_profile_path")
+            self.competition_profile = load_competition_profile(
+                self.competition_name,
+                base_dir=profile_dir,
+                explicit_path=profile_path,
+                logger=self.logger,
+            )
+
+            knowledge_dir = config.get("competition_knowledge_dir", "competitions")
+            knowledge_top_k = config.get("competition_knowledge_top_k", 5)
+            self.knowledge_store = CompetitionKnowledgeStore(
+                self.competition_name,
+                base_dir=knowledge_dir,
+                top_k=knowledge_top_k,
+                logger=self.logger,
+            )
+
+    def set_historical_results(self, results: Optional[List[ExperimentResult]]) -> None:
+        """Set prior-run results to include in KSE prompts."""
+        self.historical_results = list(results or [])
+        if self.historical_results:
+            self.logger.info(
+                "Historical results loaded for KSE prompt: %d entries",
+                len(self.historical_results),
+            )
 
     def set_dataset_analysis(self, analysis: Optional[Dict[str, Any]]) -> None:
         """
@@ -289,22 +324,40 @@ class KnowledgeStrategyEngine(BaseComponent):
                             official_scores: Optional[Dict[str, float]],
                             current_iteration: int) -> str:
         """Format WAA results (with official scores) for prompt embedding."""
-        if not previous_results:
+        has_history = bool(self.historical_results)
+        if not previous_results and not has_history:
             return "No WAA results available yet."
 
         latest_iter = current_iteration - 1 if current_iteration > 0 else 0
-        iter_results = [r for r in previous_results if r.iteration == latest_iter] or previous_results
-        lines = []
-        for r in iter_results:
-            official = None
-            if official_scores:
-                official = official_scores.get(r.experiment_id)
-            official_str = f"{official:.4f}" if official is not None else "N/A"
+        if previous_results:
+            iter_results = [r for r in previous_results if r.iteration == latest_iter] or previous_results
+        else:
+            iter_results = []
+        current_lines = []
+        if iter_results:
+            for r in iter_results:
+                official = None
+                if official_scores:
+                    official = official_scores.get(r.experiment_id)
+                official_str = f"{official:.4f}" if official is not None else "N/A"
+                score_str = f"{r.score:.4f}" if r.score is not None else "N/A"
+                current_lines.append(
+                    f"- {r.experiment_id} | strategy={r.strategy_name} | cv_score={score_str} | official_score={official_str} | status={r.status}"
+                )
+
+        historical_lines = []
+        for r in self.historical_results:
             score_str = f"{r.score:.4f}" if r.score is not None else "N/A"
-            lines.append(
-                f"- {r.experiment_id} | strategy={r.strategy_name} | cv_score={score_str} | official_score={official_str} | status={r.status}"
+            historical_lines.append(
+                f"- {r.experiment_id} | strategy={r.strategy_name} | cv_score={score_str} | official_score=N/A | status={r.status}"
             )
-        return "\n".join(lines) if lines else "No WAA results available yet."
+
+        blocks = []
+        if historical_lines:
+            blocks.append("Historical results (prior runs):\n" + "\n".join(historical_lines))
+        if current_lines:
+            blocks.append("Current run results:\n" + "\n".join(current_lines))
+        return "\n\n".join(blocks) if blocks else "No WAA results available yet."
 
     def _load_pa_analysis_markdown(self, current_iteration: int) -> str:
         """Load the most recent PA analysis markdown for context."""
@@ -654,6 +707,9 @@ class KnowledgeStrategyEngine(BaseComponent):
             f"{data_paths['crawler']} (crawler outputs)" if data_paths["crawler"] != "not available" else "not available"
         )
 
+        profile_block = self._format_competition_profile_block()
+        knowledge_block = self._format_competition_knowledge_block()
+
         context_block = "\n".join([
             f"- Competition name: {competition_info.name or 'Unknown competition'}",
             f"- Iteration: {iteration}",
@@ -663,6 +719,11 @@ class KnowledgeStrategyEngine(BaseComponent):
             f"- Common template: {common_rel}",
             f"- Experiment templates:\n{experiment_paths_block}"
         ])
+
+        if profile_block:
+            context_block += "\n\n" + profile_block
+        if knowledge_block:
+            context_block += "\n\n" + knowledge_block
 
         waa_results_block = self._format_waa_results(previous_results, official_scores, iteration)
         pa_analysis_block = self._load_pa_analysis_markdown(iteration)
@@ -685,6 +746,18 @@ class KnowledgeStrategyEngine(BaseComponent):
         )
 
         return prompt
+
+    def _format_competition_profile_block(self) -> str:
+        if not self.competition_profile:
+            return ""
+        return self.competition_profile.format_for_kse()
+
+    def _format_competition_knowledge_block(self) -> str:
+        if not self.knowledge_store:
+            return ""
+        if not self.knowledge_store._data.top_results:
+            return ""
+        return self.knowledge_store.format_for_kse()
 
     def _find_remaining_placeholders(self, paths: List[Path]) -> Dict[str, List[str]]:
         """Return remaining {{placeholders}} in the given files."""
@@ -827,16 +900,29 @@ class KnowledgeStrategyEngine(BaseComponent):
             f"- Follow the experiment blueprint above precisely for {exp_id}.\n"
             f"- Produce `result_{exp_id}.json` with the validation metric.\n"
             f"- Produce `submission_{exp_id}.csv` in the competition format.\n"
+            f"- Validate the submission with official constraints (proxies only for pruning); mark FAILURE if invalid.\n"
             f"- Log key steps and metrics to `waa_{exp_id}.log`.\n"
             f"- Create `DONE_{exp_id}` when all outputs are ready.\n"
         )
 
-        return (
-            f"# Experiment Task: {exp_id}\n\n"
-            f"## Competition-Wide Plan\n{common_content}\n\n"
-            f"## Experiment Plan\n{experiment_content}\n"
-            f"{execution_notes}"
-        )
+        profile_block = ""
+        if self.competition_profile:
+            profile_block = self.competition_profile.format_for_waa()
+
+        knowledge_block = ""
+        if self.knowledge_store:
+            knowledge_block = self.knowledge_store.format_for_waa()
+
+        guidance_block = "\n\n".join([block for block in (profile_block, knowledge_block) if block])
+
+        sections = [
+            f"# Experiment Task: {exp_id}",
+            f"## Competition-Wide Plan\n{common_content}",
+        ]
+        if guidance_block:
+            sections.append(guidance_block)
+        sections.append(f"## Experiment Plan\n{experiment_content}")
+        return "\n\n".join(sections) + execution_notes
 
     def _generate_programmatic_hypotheses(self,
                                           iteration: int,
@@ -1073,22 +1159,21 @@ class KnowledgeStrategyEngine(BaseComponent):
                 # Default steps
                 task_md += f"1. Load data from `{comp_info.data_files}`\n"
                 task_md += f"2. Implement {strategy} with specified parameters\n"
-                task_md += f"3. Train model using cross-validation\n"
-                task_md += f"4. Generate predictions on test set\n"
+                task_md += f"3. Run the solver/heuristic and compute the local score\n"
+                task_md += f"4. Generate submission output in the required format\n"
                 task_md += f"5. Save results to `result_{exp_id}.json`\n"
 
             task_md += f"\n### Expected Output\n"
-            task_md += f"- Model file: `model_{exp_id}.pkl`\n"
-            task_md += f"- Predictions: `submission_{exp_id}.csv`\n"
+            task_md += f"- Optional solution artifact: `solution_{exp_id}.txt`\n"
+            task_md += f"- Submission: `submission_{exp_id}.csv`\n"
             task_md += f"- Results JSON: `result_{exp_id}.json` containing:\n"
-            task_md += f"  - validation_score\n"
-            task_md += f"  - feature_importance (if applicable)\n"
+            task_md += f"  - score\n"
             task_md += f"  - runtime_seconds\n"
             task_md += f"  - parameters_used\n"
 
             task_md += f"\n### Success Criteria\n"
-            task_md += f"- Model trains without errors\n"
-            task_md += f"- Validation score is computed\n"
+            task_md += f"- Solver runs without errors\n"
+            task_md += f"- Local score is computed\n"
             task_md += f"- Submission file is in correct format\n"
             task_md += f"- Results are saved to JSON\n"
             task_md += f"- Completion marker created: `DONE_{exp_id}`\n"
@@ -1122,21 +1207,19 @@ Based on discussion analysis, here are relevant insights for this strategy:
 
 ## Instructions for AI Agent (WAA)
 
-1.  **Understand the Goal:** The primary goal is to train a model using the '{strategy}' approach with the specified parameters and evaluate it using the '{comp_info.evaluation_metric}' metric.
+1.  **Understand the Goal:** The primary goal is to solve the problem using the '{strategy}' approach with the specified parameters and evaluate it using the '{comp_info.evaluation_metric}' metric.
 2.  **Load Data:** Load the necessary data files: {', '.join(comp_info.data_files)}. Assume they are available in the standard data directory relative to the worktree root.
-3.  **Preprocessing/Feature Engineering:** Apply preprocessing steps suitable for the '{strategy}'. If the strategy includes 'FeatureEng', implement the corresponding feature engineering logic. Use features specified in parameters if available (e.g., `feature_set`).
-4.  **Model Training:**
-    *   Instantiate the model based on the '{strategy}' (e.g., LightGBM, RandomForest, a simple Keras/PyTorch NN).
-    *   Use the provided `parameters` for model initialization and training (e.g., learning rate, number of estimators, epochs, layers).
-    *   Train the model on the training data. Implement cross-validation if appropriate for the strategy.
-5.  **Prediction & Evaluation:**
-    *   Generate predictions on a validation set (or via CV).
+3.  **Representation/Preprocessing:** Apply any preprocessing or representation steps suitable for the '{strategy}'. Use parameters if provided (e.g., search settings or operators).
+4.  **Solver Execution:**
+    *   Implement the heuristic based on the '{strategy}' (e.g., greedy, local search, SA, GA).
+    *   Use the provided `parameters` for schedules, neighborhoods, or restart logic.
+    *   Run the solver with one or more seeds and track the best solution.
+5.  **Evaluation & Submission:**
     *   Calculate the score using the '{comp_info.evaluation_metric}' metric.
-    *   Generate predictions on the test set.
+    *   Generate the submission output in the required format.
 6.  **Output Generation:**
-    *   Save the trained model (optional, if needed later).
-    *   Save the validation/CV score to `result_{exp_id}.json` in the worktree root (format: `{{"score": <score_value>}}`).
-    *   Save the test predictions to `submission_{exp_id}.csv` in the format required by the competition.
+    *   Save the score to `result_{exp_id}.json` in the worktree root (format: `{{\"score\": <score_value>}}`).
+    *   Save the predictions to `submission_{exp_id}.csv` in the format required by the competition.
     *   Log key steps and results to `waa_{exp_id}.log`.
 7.  **Final Step:** Create a file named `DONE_{exp_id}` in the worktree root to signal completion.
 

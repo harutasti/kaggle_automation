@@ -140,7 +140,10 @@ def _run_preflight_checks(config: dict, logger) -> None:
                 (
                     "from playwright.sync_api import sync_playwright\n"
                     "with sync_playwright() as p:\n"
-                    "    b = p.chromium.launch(headless=True)\n"
+                    "    try:\n"
+                    "        b = p.chromium.launch(headless=True, chromiumSandbox=False)\n"
+                    "    except TypeError:\n"
+                    "        b = p.chromium.launch(headless=True, args=['--no-sandbox'])\n"
                     "    b.close()\n"
                     "print('OK')\n"
                 ),

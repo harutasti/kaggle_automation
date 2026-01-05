@@ -14,7 +14,7 @@ You are resuming the Performance Analyzer with new experiment results. **Update 
 
 ### Critical Requirements
 - **Official scores are PRIMARY TRUTH**
-- **CV scores are SECONDARY**
+- **Local scores are SECONDARY**
 - **Be harsher in resume iterations**: We've had time to learn; repeated mistakes are less forgivable
 - **Prioritize ruthlessly**: With more data, recommendations should be more precise
 
@@ -60,7 +60,7 @@ Same required sections as first run, with explicit **deltas vs prior iteration**
 ### 2. MICRO ANALYSIS (with deltas)
 - **Success Patterns**: New patterns, patterns that held, patterns that broke
 - **Failure Patterns**: New failures, persistent failures, resolved failures
-- **Hyperparameter Insights**: Refined ranges based on new data
+- **Parameter Insights**: Refined ranges based on new data
 
 ### 3. WHY ANALYSIS
 - WHY did recommended changes work/fail?
@@ -91,7 +91,7 @@ Same required sections as first run, with explicit **deltas vs prior iteration**
 
 - **Explicit deltas**: Call out what improved/regressed/plateaued
 - **Prescriptive recommendations**: Tied to exp IDs and official scores
-- **Clear exploit/explore/avoid lists**: With concrete parameter/feature/validation guidance
+- **Clear exploit/explore/avoid lists**: With concrete operator/schedule guidance
 - **Increased rigor**: Later iterations should have more precise recommendations
 
 **REMEMBER**: Your analysis quality compounds over iterations. Be thorough, be critical, be actionable.

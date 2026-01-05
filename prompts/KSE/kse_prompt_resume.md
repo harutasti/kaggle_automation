@@ -1,6 +1,6 @@
 # KSE Prompt (Resume Iteration)
 
-You are resuming the Knowledge Strategy Engine with new evidence from completed experiments. Your task is to **evolve the strategy** based on what worked and what failed, while maintaining hypothesis diversity.
+You are resuming the Knowledge Strategy Engine with new evidence from completed experiments. Your task is to **evolve the heuristic strategy** based on what worked and what failed, while maintaining diversity.
 
 ---
 
@@ -8,8 +8,8 @@ You are resuming the Knowledge Strategy Engine with new evidence from completed 
 
 ### Analyze Before Acting
 Before generating new hypotheses:
-1. **Rank all experiments by official score** (not CV score)
-2. **Identify the top 2-3 performing strategies** and extract their key elements
+1. **Rank all experiments by official score**
+2. **Identify the top 2-3 performing strategies** and extract their key operators
 3. **Identify complete failures** and understand root causes
 4. **Calculate improvement rate**: Are scores improving, plateauing, or declining?
 5. **Check diversity**: Were previous hypotheses truly different?
@@ -26,9 +26,9 @@ Before generating new hypotheses:
 ### Deep Dive on Results
 For each completed experiment:
 - What was the official score? (primary metric)
-- What was the CV score? (stability indicator)
-- What was the train-val gap? (overfitting indicator)
-- What unique elements did it use?
+- What was the local score? (stability indicator)
+- How stable were results across seeds or restarts?
+- What unique operators or heuristics did it use?
 - Why did it succeed or fail?
 
 ### PA Recommendations Review
@@ -64,6 +64,11 @@ Calculate:
 - **40% Diagnostic**: Experiments to understand what broke
 - **40% Reset**: Return to simpler baselines and rebuild
 
+### Depth Escalation Rule (MANDATORY)
+- Always include at least one **deep** run for the top-performing family (2-3x the probe budget)
+- Reuse the best parameter sets; change only a small subset per iteration
+- If official scores are missing, base decisions on local score + validity rate
+
 ### Kill and Replace Protocol
 
 **Remove approaches that:**
@@ -72,8 +77,8 @@ Calculate:
 - Are too similar to better-performing alternatives
 
 **Replace with:**
-- Genuinely new approaches from research findings
-- Combinations of successful elements from top experiments
+- Genuinely new heuristic families
+- Combinations of successful operators from top experiments
 - PA high-priority recommendations
 
 **Document:**
@@ -86,13 +91,13 @@ Calculate:
 
 ### Web Search for Fresh Ideas
 Use web search to find:
-- New techniques that might address observed weaknesses
-- Community solutions to problems similar to your failures
+- New heuristics that might address observed weaknesses
+- Community solutions to similar optimization problems
 - Updated benchmarks or methods published recently
 - Winning approaches from similar competitions
 
 ### Apply Research to Strategy
-- Which research findings apply to high-priority PA recommendations?
+- Which findings apply to high-priority PA recommendations?
 - What new techniques could break the plateau (if plateauing)?
 - What fundamentally different approaches haven't been tried?
 
@@ -112,7 +117,11 @@ Use web search to find:
 
 **Differentiates by:**
 - How this is fundamentally different from other hypotheses this round
-- What unique approach or combination it uses
+- What unique operator set or search strategy it uses
+
+**Budget and inheritance:**
+- Budget tier (probe/deep) and expected runtime
+- Which parameters are inherited vs changed
 
 **Research source:**
 - What web search finding or discussion insight supports this
@@ -139,11 +148,11 @@ Contains: Performance analysis with success/failure patterns and recommendations
 ## Required Diversity (Maintain Across Iterations)
 
 Even in later iterations, maintain coverage:
-1. **GBDT Line**: At least one LightGBM/XGBoost/CatBoost approach
-2. **Linear/Shallow**: At least one interpretable baseline
-3. **Deep/Tabular DL**: At least one neural approach
-4. **Ensemble/Stack**: At least one combination approach
-5. **Feature-Heavy**: At least one feature engineering focus
+1. **Greedy/Constructive Baseline**: At least one simple baseline
+2. **Local Search**: At least one neighborhood-based approach
+3. **Metaheuristic**: At least one SA/Tabu/ILS/VNS
+4. **Population-Based**: At least one GA/ES
+5. **Hybrid or Constraint/Exact**: At least one CP-SAT/ILP or hybrid approach
 
 **Note**: You may retire approaches in categories that consistently fail, but document the decision and have coverage in other categories.
 
@@ -157,11 +166,12 @@ Document at the start of common template:
 - Which approaches were killed and why
 - Which new approaches were added and why
 - Current trajectory assessment (improving/plateauing/declining)
+- Which parameters/budgets were carried over from top performers
 
 ### 2. Updated Common Template
 - Refine based on learnings
 - Update research findings section with new discoveries
-- Adjust validation strategy if evidence supports changes
+- Adjust evaluation strategy if evidence supports changes
 
 ### 3. Updated Experiment Templates
 For each hypothesis:
@@ -188,6 +198,8 @@ Show how diversity is maintained despite strategic evolution.
 - Each experiment is justified by WAA/PA evidence
 - No near-duplicates of previous iterations
 - No placeholders (`{{...}}`) remain
+- Each experiment enforces official constraint validation (no proxy-only geometry)
+ - Depth is allocated to proven families while diversity coverage is maintained
 
 ### Strategic Coherence
 - Evolution should be logical progression from previous iteration

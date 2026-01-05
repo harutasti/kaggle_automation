@@ -14,6 +14,7 @@ dependencies = [
     "numpy>=2.3.5",
     "rich>=14.2.0",
     "playwright>=1.56.0",
+    "pyyaml>=6.0",
 ]
 
 # NOTE: tmux is an OS-level dependency and cannot be installed via `uv sync`.

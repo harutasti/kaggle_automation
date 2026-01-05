@@ -10,6 +10,7 @@ from ..data_models import ExperimentResult, ExperimentHypothesis
 from ..utils.file_utils import ensure_dir, read_json, copy_file, move_file, write_json, read_markdown
 from ..utils.done_status import read_done_status
 from ..utils.codex_jsonl import write_codex_messages_file
+from ..utils.submission_validator import validate_submission
 
 class ResultAggregatorDatabase(BaseComponent):
     def __init__(self, config: dict):
@@ -26,29 +27,61 @@ class ResultAggregatorDatabase(BaseComponent):
     def _load_manifest(self) -> Dict[str, ExperimentResult]:
         """Load results from the manifest file."""
         manifest_data = read_json(self.manifest_file)
-        cache = {}
-        if manifest_data:
-            # Convert JSON into ExperimentResult objects (simple approach)
-            # A robust approach would use dataclasses-json, etc.
-            for exp_id, data in manifest_data.items():
-                 try:
-                     # Convert datetime strings to datetime objects
-                     data['start_time'] = datetime.datetime.fromisoformat(data['start_time']) if data.get('start_time') else None
-                     data['end_time'] = datetime.datetime.fromisoformat(data['end_time']) if data.get('end_time') else None
-                     # Derive execution_time_seconds if missing/None
-                     if 'execution_time_seconds' not in data or data['execution_time_seconds'] is None:
-                         if data.get('start_time') and data.get('end_time'):
-                            data['execution_time_seconds'] = (data['end_time'] - data['start_time']).total_seconds()
-                         else:
-                            data['execution_time_seconds'] = 0.0  # Or another sensible default
-
-                     cache[exp_id] = ExperimentResult(**data)
-                 except Exception as e:
-                     self.logger.error(f"Error loading result data for {exp_id} from manifest: {e}")
+        cache = self._parse_manifest_data(manifest_data, logger=self.logger)
+        if cache:
             self.logger.info(f"Loaded {len(cache)} results from manifest.")
         else:
-             self.logger.info("Manifest file not found or empty. Starting with empty cache.")
+            self.logger.info("Manifest file not found or empty. Starting with empty cache.")
         return cache
+
+    @staticmethod
+    def _parse_manifest_data(
+        manifest_data: Optional[Dict[str, dict]],
+        *,
+        logger=None,
+    ) -> Dict[str, ExperimentResult]:
+        """Parse manifest JSON into ExperimentResult objects."""
+        cache: Dict[str, ExperimentResult] = {}
+        if not manifest_data:
+            return cache
+
+        for exp_id, data in manifest_data.items():
+            try:
+                parsed = dict(data)
+                parsed['start_time'] = (
+                    datetime.datetime.fromisoformat(parsed['start_time'])
+                    if parsed.get('start_time')
+                    else None
+                )
+                parsed['end_time'] = (
+                    datetime.datetime.fromisoformat(parsed['end_time'])
+                    if parsed.get('end_time')
+                    else None
+                )
+                if 'execution_time_seconds' not in parsed or parsed['execution_time_seconds'] is None:
+                    if parsed.get('start_time') and parsed.get('end_time'):
+                        parsed['execution_time_seconds'] = (
+                            parsed['end_time'] - parsed['start_time']
+                        ).total_seconds()
+                    else:
+                        parsed['execution_time_seconds'] = 0.0
+                cache[exp_id] = ExperimentResult(**parsed)
+            except Exception as exc:
+                if logger:
+                    logger.error(f"Error loading result data for {exp_id} from manifest: {exc}")
+        return cache
+
+    @classmethod
+    def load_results_from_manifest(
+        cls,
+        manifest_file: str,
+        *,
+        logger=None,
+    ) -> List[ExperimentResult]:
+        """Load results from an arbitrary manifest file (read-only)."""
+        manifest_data = read_json(manifest_file)
+        cache = cls._parse_manifest_data(manifest_data, logger=logger)
+        return list(cache.values())
 
     def _save_manifest(self):
         """Persist the current results cache to the manifest file."""
@@ -147,18 +180,6 @@ class ResultAggregatorDatabase(BaseComponent):
         result_data = read_json(result_json_path)
         score = self._extract_score(result_data) if result_data else None
         error_message = None
-        if status != "SUCCESS":
-            if os.path.exists(error_log_path):
-                error_message = read_markdown(error_log_path)  # Read error log content
-            elif done_info.detail:
-                error_message = done_info.detail
-            elif status == "UNEXPECTED_FAILURE":
-                error_message = "WAA process terminated unexpectedly."
-            elif status == "FAILURE_NO_DONE_FILE":
-                error_message = "DONE file was not created."
-            else:
-                # Could inspect WAA logs for details (omitted)
-                error_message = "Simulated WAA failure or error during execution."
 
 
         # Copy result files and build list
@@ -183,6 +204,7 @@ class ResultAggregatorDatabase(BaseComponent):
         # Other potential outputs (submission, model, etc.)
         # Submission/model files: prefer exact, then a single fallback
         submission_candidates = [f"submission_{exp_id}.csv", "submission.csv"]
+        submission_source_path = None
         for fname in submission_candidates:
             src_path = os.path.join(worktree_path, fname)
             if os.path.exists(src_path):
@@ -190,6 +212,7 @@ class ResultAggregatorDatabase(BaseComponent):
                 dst_absolute = os.path.join(self.results_base_dir, dst_relative)
                 copy_file(src_path, dst_absolute)
                 collected_files_relative.append(dst_relative)
+                submission_source_path = src_path
                 break  # copy at most one submission to avoid mixing iterations
 
         model_candidates = [f"model_{exp_id}.pkl"]
@@ -215,6 +238,34 @@ class ResultAggregatorDatabase(BaseComponent):
                     copy_file(src_path, dst_absolute)
                     collected_files_relative.append(dst_relative)
                     self.logger.info(f"Collected model artifact via glob pattern '{pattern}': {fname}")
+
+        validation_reason = None
+        if status == "SUCCESS" and submission_source_path:
+            comp_name = self.config.get("kaggle_competition_name", "")
+            ok, reason = validate_submission(
+                competition_name=comp_name,
+                submission_path=submission_source_path,
+                experiment_run_dir=self.experiment_run_dir,
+                logger=self.logger,
+            )
+            if not ok:
+                status = "FAILURE_INVALID_SUBMISSION"
+                validation_reason = reason or "Submission failed validation."
+
+        if status != "SUCCESS":
+            if validation_reason:
+                error_message = validation_reason
+            elif os.path.exists(error_log_path):
+                error_message = read_markdown(error_log_path)  # Read error log content
+            elif done_info.detail:
+                error_message = done_info.detail
+            elif status == "UNEXPECTED_FAILURE":
+                error_message = "WAA process terminated unexpectedly."
+            elif status == "FAILURE_NO_DONE_FILE":
+                error_message = "DONE file was not created."
+            else:
+                # Could inspect WAA logs for details (omitted)
+                error_message = "Simulated WAA failure or error during execution."
 
         # Copy JSONL output to codex-responses/WAA/ directory
         codex_output_jsonl = os.path.join(worktree_path, f"codex_output_{exp_id}.jsonl")

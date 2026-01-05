@@ -1,0 +1,18 @@
+competition: santa-2025
+version: 1
+kse_guidance: |
+  Focus on strict feasibility: no overlaps, all trees inside the square boundary.
+  Prefer heuristics that can polish solutions and validate with the official checker.
+  When allocating deep budgets, prioritize approaches that can reuse good placements.
+waa_guidance: |
+  Use the official validator before DONE. Proxy geometry is allowed only for pruning.
+  Save intermediate placements and reuse them for restarts or local improvement.
+asset_paths:
+  - competitions/santa-2025
+  - src/utils/submission_validator.py
+entry_points:
+  validator_cli: src/tools/validate_submission.py
+  competition_tools: competitions/santa-2025/tools.py
+notes:
+  - Metric direction: lower is better (minimize square size).
+  - Overlap errors must be treated as invalid submissions.

@@ -73,6 +73,13 @@ kaggle.json
 kaggle_competitions/
 
 # ============================================================================
+# Competition Knowledge Artifacts
+# ============================================================================
+competitions/*/knowledge/knowledge.json
+competitions/*/knowledge/solutions/*
+!competitions/*/knowledge/README.md
+
+# ============================================================================
 # Project: AI Integration (Codex/Claude)
 # ============================================================================
 # Codex execution outputs

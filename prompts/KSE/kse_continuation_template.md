@@ -43,10 +43,10 @@ You are resuming an experiment that showed promise. Your job is to **improve** i
 ### Step 2: Implement Improvements
 - Follow PA's improvement instructions above
 - Make targeted changes, not wholesale rewrites
-- Keep the same validation scheme for score comparability
+- Keep evaluation settings comparable to prior runs
 
 ### Step 3: Validate Changes
-- Run the updated model with cross-validation
+- Re-run the solver with comparable settings
 - Compare new score to previous score ({{PARENT_SCORE}})
 - Ensure the implementation is complete and correct
 
@@ -62,14 +62,14 @@ You are resuming an experiment that showed promise. Your job is to **improve** i
 ### DO:
 - Build on existing code
 - Make incremental improvements
-- Keep the same CV folds for comparability
+- Keep evaluation settings comparable
 - Follow PA's specific instructions
 - Document your changes clearly
 
 ### DO NOT:
 - Start from scratch
 - Change the fundamental approach without reason
-- Use a different CV scheme
+- Change evaluation settings without justification
 - Ignore PA's improvement instructions
 - Make changes beyond what's necessary
 
@@ -82,7 +82,7 @@ All outputs should use the CONTINUATION ID: `{{CONTINUATION_ID}}`
 1. **Results JSON:** `result_{{CONTINUATION_ID}}.json`
    ```json
    {
-     "score": <new_validation_score>,
+     "score": <new_score>,
      "parent_score": {{PARENT_SCORE}},
      "improvement": <score_difference>,
      "changes_made": ["list", "of", "changes"],
@@ -92,7 +92,7 @@ All outputs should use the CONTINUATION ID: `{{CONTINUATION_ID}}`
 
 2. **Submission CSV:** `submission_{{CONTINUATION_ID}}.csv`
    - Must be in competition format
-   - Generated from the improved model
+   - Generated from the improved solver
 
 3. **Log File:** `waa_{{CONTINUATION_ID}}.log`
    - Document all changes made
@@ -112,7 +112,7 @@ All outputs should use the CONTINUATION ID: `{{CONTINUATION_ID}}`
 | PA Instructions | All implemented |
 | Documentation | Changes clearly logged |
 | Output Files | All present and valid |
-| Comparability | Same CV scheme used |
+| Comparability | Same evaluation settings used |
 
 ---
 
@@ -120,7 +120,7 @@ All outputs should use the CONTINUATION ID: `{{CONTINUATION_ID}}`
 
 1. **Temptation to Rewrite:** Don't throw away working code. Make targeted improvements.
 
-2. **Changing CV Scheme:** Keep the same validation setup so scores are comparable.
+2. **Changing Evaluation Settings:** Keep the same evaluation setup so scores are comparable.
 
 3. **Ignoring PA Instructions:** PA's analysis is based on experiment results. Follow its guidance.
 
