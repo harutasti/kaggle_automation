@@ -209,6 +209,8 @@ Configs are JSON files in `config/`. The most important keys:
 - `slack_notify_on_iteration_end`: send a Slack message after each iteration (default false)
 - `slack_webhook_url`: Slack webhook URL (optional; prefer env var)
 - `slack_webhook_env`: env var name for webhook (default `SLACK_WEBHOOK_URL`)
+- `codex_web_search_enabled`: enable Codex CLI web search (default false)
+- `codex_web_search_modes`: list of components that may use web search (e.g., `["KSE"]`)
 
 ## Competition Profiles and Knowledge
 
@@ -236,7 +238,9 @@ Example:
   "use_crawler": true,
   "analyze_dataset": true,
   "slack_notify_on_iteration_end": true,
-  "slack_webhook_env": "SLACK_WEBHOOK_URL"
+  "slack_webhook_env": "SLACK_WEBHOOK_URL",
+  "codex_web_search_enabled": true,
+  "codex_web_search_modes": ["KSE"]
 }
 ```
 

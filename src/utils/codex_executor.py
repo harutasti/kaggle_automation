@@ -537,7 +537,8 @@ def execute_kse_hypothesis_generation(
     logger: Optional[logging.Logger] = None,
     resume_prompt: str | None = None,
     run_label: str | None = None,
-    live_view_config: Optional[dict] = None
+    live_view_config: Optional[dict] = None,
+    config: Optional[dict] = None
 ) -> CodexResult:
     """
     Execute KSE hypothesis generation using Codex.
@@ -596,12 +597,21 @@ def execute_kse_hypothesis_generation(
     logger.info(f"Executing KSE for iteration {iteration}")
     start_time = time.time()
 
+    use_search = bool((config or {}).get("codex_web_search_enabled", False))
+    search_modes = (config or {}).get("codex_web_search_modes") or ["KSE"]
+    if isinstance(search_modes, str):
+        search_modes = [m.strip() for m in search_modes.split(",") if m.strip()]
+    use_search = use_search and any(mode.upper() == "KSE" for mode in search_modes)
+
     try:
         # Build command
         # For resume: codex exec --skip-git-repo-check --json resume --last "prompt"
         # For initial: codex exec --skip-git-repo-check --json
         if resume_prompt:
-            cmd = ["codex", "exec", "--skip-git-repo-check", "--json", "resume", "--last", stdin_input]
+            cmd = ["codex", "exec", "--skip-git-repo-check", "--json"]
+            if use_search:
+                cmd.append("--search")
+            cmd += ["resume", "--last", stdin_input]
             proc = subprocess.run(
                 cmd,
                 stdout=subprocess.PIPE,
@@ -612,6 +622,8 @@ def execute_kse_hypothesis_generation(
             )
         else:
             cmd = ["codex", "exec", "--skip-git-repo-check", "--json"]
+            if use_search:
+                cmd.append("--search")
             proc = subprocess.run(
                 cmd,
                 input=stdin_input.encode("utf-8"),

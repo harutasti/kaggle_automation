@@ -30,6 +30,8 @@
   "waa_resume_max_attempts": 2,
   "training_idle_threshold_minutes": 3,
   "resource_monitor_interval_seconds": 30,
+  "codex_web_search_enabled": true,
+  "codex_web_search_modes": ["KSE"],
   "slack_notify_on_iteration_end": true,
   "slack_webhook_env": "SLACK_WEBHOOK_URL",
   "codex_live_view": {
