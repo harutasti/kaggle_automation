@@ -207,6 +207,10 @@ Configs are JSON files in `config/`. The most important keys:
   - `enabled`, `max_improvement_ratio`, `max_improvement_delta`, `require_official_score`, `skip_no_improvement_on_untrusted`
 - `simulation_mode`: if `true`, avoids **Codex calls only** and uses the simulator for WAAs; Kaggle API + crawler/data download still run (submissions are disabled)
 - `use_crawler`: whether to crawl Kaggle pages/discussions with Playwright
+- `crawler_cache_enabled`: enable crawler cache/diff updates (default true)
+- `crawler_cache_ttl_hours`: hours before re-fetching cached pages (default 24)
+- `crawler_summary_enabled`: write cache summary files under `kaggle_competitions/<slug>/cache/` (default true)
+- `crawler_force_refresh`: force a full crawler refresh (clears cached outputs; default false)
 - `max_discussions`: max number of discussion threads to crawl (top-N by votes)
 - `codex_web_search_enabled`: enable Codex `--search` for selected modes
 - `codex_web_search_modes`: list of modes to use web search (e.g., `["KSE"]`)
@@ -244,6 +248,10 @@ Example:
   "stop_condition": { "no_improvement_iterations": 2 },
   "simulation_mode": true,
   "use_crawler": true,
+  "crawler_cache_enabled": true,
+  "crawler_cache_ttl_hours": 24,
+  "crawler_summary_enabled": true,
+  "crawler_force_refresh": false,
   "analyze_dataset": true,
   "slack_notify_on_iteration_end": true,
   "slack_webhook_env": "SLACK_WEBHOOK_URL",
@@ -336,6 +344,8 @@ uv run python src/kaggle_crawler/crawl_kaggle_competition.py <competition_slug> 
 ```
 
 Crawler output goes to `kaggle_competitions/<competition_slug>/` and is reused by KIM/KSE/EO when present.
+Cache/diff summaries are written to `kaggle_competitions/<competition_slug>/cache/summary.md` by default.
+Use `--no-cache` (or `--cache-ttl-hours 0`) to force re-fetching, and `--no-summary` to disable summary output.
 
 ---
 

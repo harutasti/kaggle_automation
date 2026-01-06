@@ -82,8 +82,23 @@ class KaggleInterfaceManager(BaseComponent):
                 self.logger.error(f"Crawler script not found: {crawler_script}")
                 return False
             
-            cmd = [sys.executable, "-u", crawler_script, self.competition_name,
-                   f"--max-discussions", str(self.max_discussions), "--force"]
+            cmd = [
+                sys.executable,
+                "-u",
+                crawler_script,
+                self.competition_name,
+                "--max-discussions",
+                str(self.max_discussions),
+            ]
+            if self.config.get("crawler_force_refresh", False):
+                cmd.append("--force")
+            if not self.config.get("crawler_cache_enabled", True):
+                cmd.append("--no-cache")
+            cache_ttl = self.config.get("crawler_cache_ttl_hours")
+            if cache_ttl is not None:
+                cmd.extend(["--cache-ttl-hours", str(cache_ttl)])
+            if not self.config.get("crawler_summary_enabled", True):
+                cmd.append("--no-summary")
 
             self.logger.info(f"Running kaggle_crawler for competition: {self.competition_name}")
 

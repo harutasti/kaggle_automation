@@ -287,6 +287,13 @@ class KnowledgeStrategyEngine(BaseComponent):
 
         return {"kaggle": kaggle_rel, "crawler": crawler_rel}
 
+    def _get_crawler_summary_relative(self, iteration_dir: Path) -> Optional[str]:
+        """Return relative path to crawler cache summary, if present."""
+        summary_path = Path(self.hypothesis_dir) / "crawler_data" / "cache" / "summary.md"
+        if summary_path.exists():
+            return os.path.relpath(summary_path, iteration_dir)
+        return None
+
     def _compose_system_context(self,
                                 competition_info: CompetitionInfo,
                                 num_hypotheses: int,
@@ -707,6 +714,7 @@ class KnowledgeStrategyEngine(BaseComponent):
         crawler_path_label = (
             f"{data_paths['crawler']} (crawler outputs)" if data_paths["crawler"] != "not available" else "not available"
         )
+        crawler_summary_rel = self._get_crawler_summary_relative(template_info["iteration_dir"])
 
         profile_block = self._format_competition_profile_block()
         knowledge_block = self._format_competition_knowledge_block()
@@ -720,6 +728,8 @@ class KnowledgeStrategyEngine(BaseComponent):
             f"- Common template: {common_rel}",
             f"- Experiment templates:\n{experiment_paths_block}"
         ])
+        if crawler_summary_rel:
+            context_block += f"\n- Crawler summary: {crawler_summary_rel} (cache/diff)"
 
         if profile_block:
             context_block += "\n\n" + profile_block

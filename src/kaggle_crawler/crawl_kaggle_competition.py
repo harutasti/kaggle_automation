@@ -1,15 +1,20 @@
+import argparse
 import asyncio
+import datetime as dt
+import difflib
+import glob
+import hashlib
+import json
 import os
 import re
-import argparse
 import shutil
-import glob
-import json
 import sys
 import zipfile
 from pathlib import Path
-from tqdm import tqdm
+from typing import Any, Dict, List, Optional
+
 from crawl4ai import AsyncWebCrawler, BrowserConfig, CrawlerRunConfig, CacheMode
+from tqdm import tqdm
 
 try:
     # Ensure crawler prints flush promptly when invoked via subprocess.
@@ -17,6 +22,278 @@ try:
     sys.stderr.reconfigure(line_buffering=True)
 except Exception:
     pass
+
+
+# --------------------------------------------------------------------------- #
+# Cache helpers                                                               #
+# --------------------------------------------------------------------------- #
+def _utcnow_iso() -> str:
+    return dt.datetime.utcnow().replace(microsecond=0).isoformat() + "Z"
+
+
+def _parse_iso(ts: Optional[str]) -> Optional[dt.datetime]:
+    if not ts:
+        return None
+    try:
+        value = ts
+        if value.endswith("Z"):
+            value = value[:-1] + "+00:00"
+        return dt.datetime.fromisoformat(value)
+    except Exception:
+        return None
+
+
+def _hash_text(text: str) -> str:
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+def _extract_title(text: str) -> str:
+    for line in text.splitlines():
+        stripped = line.strip()
+        if stripped.startswith("#"):
+            return stripped.lstrip("#").strip()
+    return ""
+
+
+def _summarize_diff(old_text: Optional[str], new_text: Optional[str], max_samples: int = 6) -> Dict[str, Any]:
+    old_text = old_text or ""
+    new_text = new_text or ""
+    old_lines = [line.rstrip() for line in old_text.splitlines()]
+    new_lines = [line.rstrip() for line in new_text.splitlines()]
+
+    added_lines: List[str] = []
+    removed_lines: List[str] = []
+    for line in difflib.unified_diff(old_lines, new_lines, n=0):
+        if line.startswith(("---", "+++", "@@")):
+            continue
+        if line.startswith("+"):
+            value = line[1:].strip()
+            if value and value not in added_lines:
+                added_lines.append(value)
+        elif line.startswith("-"):
+            value = line[1:].strip()
+            if value and value not in removed_lines:
+                removed_lines.append(value)
+
+    old_headings = set(_extract_title(line) for line in old_lines if line.strip().startswith("#"))
+    new_headings = set(_extract_title(line) for line in new_lines if line.strip().startswith("#"))
+    old_headings.discard("")
+    new_headings.discard("")
+
+    return {
+        "added_headings": sorted(new_headings - old_headings)[:max_samples],
+        "removed_headings": sorted(old_headings - new_headings)[:max_samples],
+        "added_lines_sample": added_lines[:max_samples],
+        "removed_lines_sample": removed_lines[:max_samples],
+        "added_lines_count": len(added_lines),
+        "removed_lines_count": len(removed_lines),
+    }
+
+
+def _render_summary_markdown(payload: Dict[str, Any]) -> str:
+    lines = [
+        "# Crawler Summary (Cache/Diff)",
+        "",
+        f"- competition_id: {payload.get('competition_id', 'unknown')}",
+        f"- generated_at: {payload.get('generated_at', 'unknown')}",
+        f"- cache_enabled: {payload.get('cache_enabled', False)}",
+        f"- cache_ttl_hours: {payload.get('cache_ttl_hours', 'unknown')}",
+    ]
+    stats = payload.get("stats", {}) or {}
+    lines.append(
+        "- stats: fetched={fetched}, skipped={skipped}, new={new}, updated={updated}, unchanged={unchanged}".format(
+            fetched=stats.get("fetched", 0),
+            skipped=stats.get("skipped", 0),
+            new=stats.get("new", 0),
+            updated=stats.get("updated", 0),
+            unchanged=stats.get("unchanged", 0),
+        )
+    )
+    lines.append("")
+
+    changes = payload.get("changes", []) or []
+    if not changes:
+        lines.append("No content changes detected. Cached artifacts reused.")
+        return "\n".join(lines)
+
+    lines.append("## Changes")
+    for change in changes:
+        title = change.get("title") or change.get("page_type") or "unknown"
+        path = change.get("path", "unknown")
+        lines.append(f"- [{change.get('change', 'updated')}] {title} ({path})")
+        diff_summary = change.get("diff_summary", {}) or {}
+        added = ", ".join(diff_summary.get("added_headings", []) or [])
+        removed = ", ".join(diff_summary.get("removed_headings", []) or [])
+        if added:
+            lines.append(f"  - added_headings: {added}")
+        if removed:
+            lines.append(f"  - removed_headings: {removed}")
+        if diff_summary.get("added_lines_sample"):
+            sample = "; ".join(diff_summary["added_lines_sample"])
+            lines.append(f"  - added_lines_sample: {sample}")
+        if diff_summary.get("removed_lines_sample"):
+            sample = "; ".join(diff_summary["removed_lines_sample"])
+            lines.append(f"  - removed_lines_sample: {sample}")
+    return "\n".join(lines)
+
+
+class CrawlerCache:
+    def __init__(
+        self,
+        base_dir: Path,
+        *,
+        enabled: bool = True,
+        ttl_hours: Optional[float] = 24.0,
+        summary_enabled: bool = True,
+    ) -> None:
+        self.base_dir = base_dir
+        self.cache_dir = base_dir / "cache"
+        self.index_path = self.cache_dir / "index.json"
+        self.summary_path = self.cache_dir / "summary.json"
+        self.summary_md_path = self.cache_dir / "summary.md"
+        self.enabled = enabled
+        self.ttl_hours = ttl_hours
+        self.summary_enabled = summary_enabled
+        self.index: Dict[str, Dict[str, Any]] = self._load_index()
+        self.stats = {
+            "fetched": 0,
+            "skipped": 0,
+            "new": 0,
+            "updated": 0,
+            "unchanged": 0,
+        }
+        self.changes: List[Dict[str, Any]] = []
+
+    def _load_index(self) -> Dict[str, Dict[str, Any]]:
+        if not self.index_path.exists():
+            return {}
+        try:
+            with self.index_path.open("r", encoding="utf-8") as handle:
+                data = json.load(handle)
+            if isinstance(data, dict):
+                return data
+        except Exception:
+            pass
+        return {}
+
+    def _relative_path(self, path: Path) -> str:
+        try:
+            return str(path.relative_to(self.base_dir))
+        except Exception:
+            return str(path)
+
+    def _is_expired(self, entry: Dict[str, Any]) -> bool:
+        if not self.ttl_hours or self.ttl_hours <= 0:
+            return True
+        last_fetched = _parse_iso(entry.get("last_fetched"))
+        if not last_fetched:
+            return True
+        now = dt.datetime.utcnow()
+        age = now - last_fetched.replace(tzinfo=None)
+        return age.total_seconds() >= float(self.ttl_hours) * 3600
+
+    def should_fetch(self, url: str, output_path: Path) -> bool:
+        if not self.enabled:
+            return True
+        if not output_path.exists():
+            return True
+        entry = self.index.get(url)
+        if not entry:
+            return True
+        return self._is_expired(entry)
+
+    def record_skip(self, page_type: str, url: str, output_path: Path) -> None:
+        self.stats["skipped"] += 1
+        entry = self.index.get(url)
+        if not entry:
+            self.index[url] = {
+                "url": url,
+                "page_type": page_type,
+                "path": self._relative_path(output_path),
+                "last_fetched": None,
+            }
+
+    def record_fetch(
+        self,
+        page_type: str,
+        url: str,
+        output_path: Path,
+        new_content: str,
+        old_content: Optional[str],
+        *,
+        title: Optional[str] = None,
+    ) -> str:
+        now = _utcnow_iso()
+        new_hash = _hash_text(new_content)
+        old_hash = _hash_text(old_content) if old_content else None
+
+        if old_content is None:
+            change = "new"
+        elif new_hash == old_hash:
+            change = "unchanged"
+        else:
+            change = "updated"
+
+        entry = self.index.get(url, {})
+        entry.update(
+            {
+                "url": url,
+                "page_type": page_type,
+                "path": self._relative_path(output_path),
+                "hash": new_hash,
+                "last_fetched": now,
+            }
+        )
+        if title:
+            entry["title"] = title
+        if change in ("new", "updated"):
+            entry["last_changed"] = now
+            entry["change_count"] = int(entry.get("change_count", 0)) + 1
+
+        self.index[url] = entry
+        self.stats["fetched"] += 1
+        self.stats[change] += 1
+
+        if change in ("new", "updated"):
+            diff_summary = _summarize_diff(old_content, new_content)
+            self.changes.append(
+                {
+                    "url": url,
+                    "page_type": page_type,
+                    "path": entry.get("path"),
+                    "title": entry.get("title", ""),
+                    "change": change,
+                    "fetched_at": now,
+                    "diff_summary": diff_summary,
+                }
+            )
+
+        return change
+
+    def save(self) -> None:
+        self.cache_dir.mkdir(parents=True, exist_ok=True)
+        with self.index_path.open("w", encoding="utf-8") as handle:
+            json.dump(self.index, handle, indent=2, ensure_ascii=True)
+
+    def write_summary(self, competition_id: str) -> None:
+        self.save()
+        if not self.summary_enabled:
+            return
+        payload = {
+            "competition_id": competition_id,
+            "generated_at": _utcnow_iso(),
+            "cache_enabled": self.enabled,
+            "cache_ttl_hours": self.ttl_hours,
+            "stats": self.stats,
+            "changes": self.changes,
+        }
+        self.cache_dir.mkdir(parents=True, exist_ok=True)
+        self.summary_path.write_text(
+            json.dumps(payload, indent=2, ensure_ascii=True), encoding="utf-8"
+        )
+        self.summary_md_path.write_text(
+            _render_summary_markdown(payload), encoding="utf-8"
+        )
 
 
 # --------------------------------------------------------------------------- #
@@ -224,11 +501,17 @@ def clean_markdown(md: str, competition_id: str, page_type: str = "overview"):
     return md.strip()
 
 
-def download_kaggle_competition_data(competition_id: str, output_dir: str) -> bool:
+def download_kaggle_competition_data(
+    competition_id: str,
+    output_dir: str,
+    *,
+    force: bool = False,
+) -> bool:
     """
     Use the Kaggle Python API to download and unzip competition data.
 
     Requires a `kaggle.json` credentials file next to this script or in ~/.kaggle.
+    Set force=True to re-download even if data is already present.
     """
     current_dir = Path(__file__).resolve().parent
     # Prefer a kaggle.json in the current working directory, fall back to alongside this script.
@@ -241,6 +524,14 @@ def download_kaggle_competition_data(competition_id: str, output_dir: str) -> bo
 
     data_dir = Path(output_dir) / "data"
     data_dir.mkdir(parents=True, exist_ok=True)
+
+    if not force:
+        existing_files = [
+            p for p in data_dir.iterdir() if p.is_file() and not p.name.startswith(".")
+        ]
+        if existing_files:
+            print(f"[download] data already present in {data_dir}; skipping download")
+            return True
     kaggle_dir_dest.mkdir(parents=True, exist_ok=True)
 
     if not kaggle_json_src.exists():
@@ -291,7 +582,7 @@ def download_kaggle_competition_data(competition_id: str, output_dir: str) -> bo
         api.authenticate()
 
         print(f"[download] downloading competition files for {competition_id}")
-        api.competition_download_files(competition_id, path=str(data_dir), force=True)
+        api.competition_download_files(competition_id, path=str(data_dir), force=force)
 
         # Unzip all .zip files using Python to avoid shell dependencies.
         zip_files = list(data_dir.glob("*.zip"))
@@ -467,6 +758,49 @@ def clean_discussion_file(input_file, output_file=None):
     return output_file, upvoted_entries, cleaned, title
 
 
+def parse_cleaned_discussion_file(cleaned_path: str):
+    """Parse a cleaned discussion Markdown file and return title + upvoted entries."""
+    try:
+        text = Path(cleaned_path).read_text(encoding="utf-8")
+    except Exception as e:
+        print(f"[clean] failed to read cleaned discussion {cleaned_path}: {e}")
+        return "Untitled Discussion", []
+
+    title_match = re.search(r"^#\s+(.+)$", text, re.MULTILINE)
+    title = title_match.group(1).strip() if title_match else "Untitled Discussion"
+
+    entry_pattern = re.compile(
+        r"\*\*(.+?)\s+\|\s+Posted\s+(.+?)\s+ago\s+\|\s+Upvotes:\s*(\d+)\*\*\n"
+        r"(.*?)(?=\n\*\*|\n##\s+Comments|\Z)",
+        re.DOTALL,
+    )
+
+    entries = []
+    for match in entry_pattern.finditer(text):
+        user = match.group(1).strip()
+        posted_time = match.group(2).strip()
+        try:
+            upvotes = int(match.group(3))
+        except ValueError:
+            upvotes = 0
+        content = match.group(4).strip()
+        if upvotes < 1 or not content:
+            continue
+        full_md = f"**{user} | Posted {posted_time} ago | Upvotes: {upvotes}**\n{content}"
+        entries.append(
+            {
+                "type": "entry",
+                "user": user,
+                "upvotes": upvotes,
+                "time": posted_time,
+                "content": content,
+                "full_md": full_md,
+            }
+        )
+
+    return title, entries
+
+
 async def clean_all_discussions_and_aggregate_upvotes(raw_dir):
     """
     Process every discussion file in `raw_dir`:
@@ -475,29 +809,44 @@ async def clean_all_discussions_and_aggregate_upvotes(raw_dir):
     • Files with no up-voted content are still cleaned but not aggregated.
     • Aggregated up-voted entries are written to upvoted_discussions.md.
     """
-    raw_files = glob.glob(os.path.join(raw_dir, "discussion_*.md"))
+    raw_files = sorted([
+        path
+        for path in glob.glob(os.path.join(raw_dir, "discussion_*.md"))
+        if "_cleaned" not in Path(path).stem
+    ])
     print(f"[clean] found {len(raw_files)} raw discussion files")
 
-    aggregated = []
     for i, raw_path in enumerate(raw_files, 1):
         try:
-            cleaned_path, upvoted, _, title = clean_discussion_file(raw_path)
+            cleaned_path, _, _, _ = clean_discussion_file(raw_path)
             # delete original raw file only if a different name was produced
             if raw_path != cleaned_path and os.path.exists(raw_path):
                 os.remove(raw_path)
-
-            if upvoted:
-                aggregated.append(
-                    {"title": title, "entries": upvoted, "file": cleaned_path}
-                )
 
             print(f"[clean] ({i}/{len(raw_files)}) {Path(raw_path).name} → cleaned")
 
         except Exception as e:
             print(f"[clean] error processing {raw_path}: {e}")
 
-    # write aggregation
+    cleaned_files = sorted(glob.glob(os.path.join(raw_dir, "discussion_*_cleaned.md")))
     upvoted_path = os.path.join(raw_dir, "upvoted_discussions.md")
+
+    if not cleaned_files:
+        if os.path.exists(upvoted_path):
+            print("[clean] no cleaned discussions found; keeping existing aggregation")
+        else:
+            print("[clean] no cleaned discussions found; skipping aggregation")
+        return
+
+    aggregated = []
+    for cleaned_path in cleaned_files:
+        title, entries = parse_cleaned_discussion_file(cleaned_path)
+        if entries:
+            aggregated.append(
+                {"title": title, "entries": entries, "file": cleaned_path}
+            )
+
+    # write aggregation
     with open(upvoted_path, "w", encoding="utf-8") as fh:
         for idx, disc in enumerate(aggregated, 1):
             fh.write("#" * 5 + "\n")
@@ -518,10 +867,16 @@ async def crawl_generic_page(
     output_path: Path,
     page_type: str,
     competition_id: str,
+    cache: Optional[CrawlerCache] = None,
 ):
     """
     Crawl a non-discussion page, clean its Markdown, and save it.
     """
+    if cache and not cache.should_fetch(url, output_path):
+        cache.record_skip(page_type, url, output_path)
+        print(f"[cache] {page_type} fresh; skipping fetch")
+        return True
+
     print(f"[crawl] {page_type}: {url}")
 
     cfg = CrawlerRunConfig(
@@ -540,14 +895,33 @@ async def crawl_generic_page(
         return False
 
     cleaned = clean_markdown(res.markdown.raw_markdown, competition_id, page_type)
+    header = f"# Kaggle Competition: {competition_id} – {page_type}\n\nSource: {url}\n\n---\n\n"
+    new_text = header + cleaned
+    existing_text = None
+    if output_path.exists():
+        try:
+            existing_text = output_path.read_text(encoding="utf-8")
+        except Exception:
+            existing_text = None
 
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-    with open(output_path, "w", encoding="utf-8") as fh:
-        fh.write(f"# Kaggle Competition: {competition_id} – {page_type}\n\n")
-        fh.write(f"Source: {url}\n\n---\n\n")
-        fh.write(cleaned)
+    change = None
+    if cache:
+        change = cache.record_fetch(
+            page_type,
+            url,
+            output_path,
+            new_text,
+            existing_text,
+            title=_extract_title(new_text),
+        )
 
-    print(f"[crawl] saved {output_path}")
+    if change != "unchanged" or existing_text is None:
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        with open(output_path, "w", encoding="utf-8") as fh:
+            fh.write(new_text)
+        print(f"[crawl] saved {output_path}")
+    else:
+        print(f"[cache] no change detected for {output_path.name}")
     return True
 
 
@@ -557,10 +931,16 @@ async def crawl_discussion_page(
     url: str,
     output_path: Path,
     thread_id: str,
+    cache: Optional[CrawlerCache] = None,
 ):
     """
     Fetch a single discussion thread and store its raw Markdown verbatim.
     """
+    if cache and not cache.should_fetch(url, output_path):
+        cache.record_skip("Discussion", url, output_path)
+        print(f"[cache] discussion {thread_id} fresh; skipping fetch")
+        return True
+
     print(f"[discussion] thread {thread_id}: {url}")
 
     # Discussions are dynamic and often never reach "networkidle" on Kaggle.
@@ -579,11 +959,32 @@ async def crawl_discussion_page(
         print(f"[discussion] FAILED – no Markdown for {url}")
         return False
 
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-    with open(output_path, "w", encoding="utf-8") as fh:
-        fh.write(res.markdown.raw_markdown)
+    new_text = res.markdown.raw_markdown
+    existing_text = None
+    if output_path.exists():
+        try:
+            existing_text = output_path.read_text(encoding="utf-8")
+        except Exception:
+            existing_text = None
 
-    print(f"[discussion] saved {output_path}")
+    change = None
+    if cache:
+        change = cache.record_fetch(
+            "Discussion",
+            url,
+            output_path,
+            new_text,
+            existing_text,
+            title=_extract_title(new_text) or f"discussion_{thread_id}",
+        )
+
+    if change != "unchanged" or existing_text is None:
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        with open(output_path, "w", encoding="utf-8") as fh:
+            fh.write(new_text)
+        print(f"[discussion] saved {output_path}")
+    else:
+        print(f"[cache] no change detected for discussion {thread_id}")
     return True
 
 
@@ -620,6 +1021,22 @@ async def main():
         help="Only download competition data and skip crawling pages/discussions",
     )
     parser.add_argument(
+        "--no-cache",
+        action="store_true",
+        help="Disable crawler cache and always fetch pages/discussions",
+    )
+    parser.add_argument(
+        "--cache-ttl-hours",
+        type=float,
+        default=24.0,
+        help="Re-fetch cached pages after this many hours (default 24)",
+    )
+    parser.add_argument(
+        "--no-summary",
+        action="store_true",
+        help="Disable writing crawler cache summary files",
+    )
+    parser.add_argument(
         "--cookies-path",
         default=None,
         help="Path to JSON cookies for a logged-in Kaggle session",
@@ -648,12 +1065,19 @@ async def main():
         d.mkdir(parents=True, exist_ok=True)
 
     # 1. Dataset
-    download_kaggle_competition_data(competition_id, base_dir)
+    download_kaggle_competition_data(competition_id, base_dir, force=args.force)
 
     if args.data_only:
         print("[mode] data-only requested; skipping page/discussion crawling")
         print(f"[output] files saved under {base_dir.resolve()}")
         return
+
+    cache = CrawlerCache(
+        base_dir,
+        enabled=not args.no_cache,
+        ttl_hours=args.cache_ttl_hours,
+        summary_enabled=not args.no_summary,
+    )
 
     # 2. Crawler
     cookies_path = _resolve_optional_path(
@@ -699,7 +1123,9 @@ async def main():
             ),
         ]
         for url, ptype, out_path in tqdm(main_pages, desc="pages"):
-            await crawl_generic_page(crawler, url, out_path, ptype, competition_id)
+            await crawl_generic_page(
+                crawler, url, out_path, ptype, competition_id, cache=cache
+            )
             await asyncio.sleep(1)
 
         # 4. Discussions
@@ -761,17 +1187,16 @@ async def main():
             m = re.search(r"/discussion/(\d+)", url)
             thread_id = m.group(1) if m else f"thread_{idx:03d}"
             out_path = discussions_dir / f"discussion_{thread_id}.md"
-
-            if out_path.exists():
-                print(f"[discussion] skip existing {out_path.name}")
-                continue
-
-            await crawl_discussion_page(crawler, url, out_path, thread_id)
+            await crawl_discussion_page(
+                crawler, url, out_path, thread_id, cache=cache
+            )
             await asyncio.sleep(1)
 
     # 5. Cleaning & aggregation
     print("\n=== Cleaning discussions & aggregating up-voted content ===")
     await clean_all_discussions_and_aggregate_upvotes(discussions_dir)
+
+    cache.write_summary(competition_id)
 
     print("\n=== All done ===")
     print(f"[output] files saved under {base_dir.resolve()}")

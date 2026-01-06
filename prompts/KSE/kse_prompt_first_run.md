@@ -145,6 +145,7 @@ Do not shy away from sophisticated methods. Consider including:
 
 ### Context Block
 Contains: Competition context, data paths, templates, rules, constraints
+If a crawler cache summary exists (e.g., `cache/summary.md` in crawler outputs), read it first and only open raw pages when needed.
 <<CONTEXT_BLOCK>>
 
 ### WAA Results (Official Scores)

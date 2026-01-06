@@ -133,6 +133,7 @@ Use web search to find:
 
 ### Context Block
 Contains: Competition context, data paths, templates
+If a crawler cache summary exists (e.g., `cache/summary.md` in crawler outputs), read it first and only open raw pages when needed.
 <<CONTEXT_BLOCK>>
 
 ### WAA Results (Official Scores)
