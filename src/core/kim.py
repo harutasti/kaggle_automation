@@ -41,7 +41,7 @@ class KaggleInterfaceManager(BaseComponent):
         self.api = self._authenticate_kaggle()
         self.use_crawler = config.get("use_crawler", True)  # Default to using crawler
         self.crawler_output_dir = "kaggle_competitions"
-        self.max_discussions = config.get("max_discussions", 20)
+        self.max_discussions = config.get("max_discussions", 100)
         self.dataset_analysis = None  # Will store dataset analysis results
         self._dataset_analyzer = None  # Will store DatasetAnalyzer instance for placeholder generation
         self.analyze_dataset = config.get("analyze_dataset", True)  # Enable dataset analysis by default
@@ -74,8 +74,8 @@ class KaggleInterfaceManager(BaseComponent):
             self.logger.critical(f"Kaggle API authentication failed: {e}")
             sys.exit(1)
     
-    def _run_crawler(self, force: bool = False) -> bool:
-        """Run kaggle_crawler to fetch competition data"""
+    def _run_crawler(self) -> bool:
+        """Run kaggle_crawler to fetch competition data."""
         try:
             crawler_script = os.path.join("src", "kaggle_crawler", "crawl_kaggle_competition.py")
             if not os.path.exists(crawler_script):
@@ -83,9 +83,7 @@ class KaggleInterfaceManager(BaseComponent):
                 return False
             
             cmd = [sys.executable, "-u", crawler_script, self.competition_name,
-                   f"--max-discussions", str(self.max_discussions)]
-            if force:
-                cmd.append("--force")
+                   f"--max-discussions", str(self.max_discussions), "--force"]
 
             self.logger.info(f"Running kaggle_crawler for competition: {self.competition_name}")
 
@@ -244,6 +242,14 @@ class KaggleInterfaceManager(BaseComponent):
             self.logger.error(f"Error running crawler: {e}")
             return False
 
+    def refresh_crawler_data(self) -> bool:
+        """Force-refresh crawler output for the competition."""
+        if not self.use_crawler:
+            self.logger.info("Crawler disabled; skipping refresh.")
+            return True
+        self.logger.info("Refreshing crawler data (forced)...")
+        return self._run_crawler()
+
     def _parse_deadline(self, raw_deadline: Any) -> Optional[datetime.datetime]:
         """Convert Kaggle API deadline field into a datetime object when possible."""
         if isinstance(raw_deadline, datetime.datetime):
@@ -340,31 +346,22 @@ class KaggleInterfaceManager(BaseComponent):
         try:
             # First, try to use crawler data if enabled
             if self.use_crawler:
-                # Check if crawler data exists and is complete (has overview file)
                 competition_path = os.path.join(self.crawler_output_dir, self.competition_name)
                 overview_file = os.path.join(competition_path, "pages", f"{self.competition_name}_overview.md")
+                crawler_ok = self.refresh_crawler_data()
 
-                if not os.path.exists(overview_file):
-                    self.logger.info("Crawler data not found or incomplete, running crawler...")
-                    if not self._run_crawler(force=True):
-                        raise RuntimeError("Crawler failed to fetch competition data. Check logs for details.")
-                    # Try to parse after crawling
+                # Parse crawler data if available
+                if os.path.exists(overview_file):
                     info = parse_competition_info(self.competition_name, self.crawler_output_dir)
                     if info:
                         self.logger.info(f"Successfully parsed competition info from crawler data: {info.name}")
                         self._log_end(method_name, info)
                         return info
-                    else:
-                        raise RuntimeError("Failed to parse crawler data after successful crawl.")
+
+                if not crawler_ok:
+                    self.logger.warning("Crawler failed to fetch competition data, falling back to other methods.")
                 else:
-                    # Parse existing crawler data
-                    info = parse_competition_info(self.competition_name, self.crawler_output_dir)
-                    if info:
-                        self.logger.info(f"Successfully parsed competition info from existing crawler data: {info.name}")
-                        self._log_end(method_name, info)
-                        return info
-                    else:
-                        self.logger.warning("Failed to parse crawler data, will try other methods")
+                    self.logger.warning("Crawler completed but parsing failed, falling back to other methods.")
             
             # Fall back to Kaggle API
             info = self._get_competition_metadata_from_api()
@@ -396,18 +393,37 @@ class KaggleInterfaceManager(BaseComponent):
                         if os.path.isfile(src_path) and not filename.startswith('.'):
                             shutil.copy2(src_path, dst_path)
                             self.logger.info(f"Copied data file: {filename}")
+
+                    # Extract any zip files copied from the crawler output.
+                    for filename in os.listdir(self.download_dir):
+                        if not filename.lower().endswith(".zip"):
+                            continue
+                        zip_path = os.path.join(self.download_dir, filename)
+                        try:
+                            self.logger.info(f"Extracting crawler ZIP: {zip_path}")
+                            with zipfile.ZipFile(zip_path, "r") as zip_ref:
+                                zip_ref.extractall(self.download_dir)
+                            os.remove(zip_path)
+                            self.logger.info(f"Removed crawler ZIP after extraction: {filename}")
+                        except Exception as e:
+                            self.logger.error(f"Failed to extract crawler ZIP {zip_path}: {e}")
                     
                     # Update competition_info with actual files
                     competition_info.data_files = [f for f in os.listdir(self.download_dir)
                                                  if os.path.isfile(os.path.join(self.download_dir, f))]
 
-                    # Analyze dataset if enabled
-                    if self.analyze_dataset:
-                        self._analyze_competition_dataset()
+                    if not any(not f.lower().endswith(".zip") for f in competition_info.data_files):
+                        self.logger.warning(
+                            "Crawler data contains only ZIP files; falling back to Kaggle API download."
+                        )
+                    else:
+                        # Analyze dataset if enabled
+                        if self.analyze_dataset:
+                            self._analyze_competition_dataset()
 
-                    self._log_end(method_name, result=True)
-                    return True
-            
+                        self._log_end(method_name, result=True)
+                        return True
+
             if self.api is None:
                 raise RuntimeError("Kaggle API is unavailable; cannot download competition data.")
 

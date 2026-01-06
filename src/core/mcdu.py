@@ -103,6 +103,34 @@ class MasterControllerDecisionUnit(BaseComponent):
         self.score_threshold = stop_config.get("score_threshold")
         self.no_improvement_threshold = stop_config.get("no_improvement_iterations", 3)
 
+        def _to_bool(value, default=False):
+            if value is None:
+                return default
+            if isinstance(value, str):
+                return value.strip().lower() not in ("false", "0", "no", "off")
+            return bool(value)
+
+        guard_config = self.config.get("score_improvement_guard", {}) or {}
+        self.score_improvement_guard_enabled = _to_bool(guard_config.get("enabled", False))
+        self.score_improvement_guard_ratio = guard_config.get("max_improvement_ratio")
+        self.score_improvement_guard_delta = guard_config.get("max_improvement_delta")
+        try:
+            if self.score_improvement_guard_ratio is not None:
+                self.score_improvement_guard_ratio = float(self.score_improvement_guard_ratio)
+        except (TypeError, ValueError):
+            self.score_improvement_guard_ratio = None
+        try:
+            if self.score_improvement_guard_delta is not None:
+                self.score_improvement_guard_delta = float(self.score_improvement_guard_delta)
+        except (TypeError, ValueError):
+            self.score_improvement_guard_delta = None
+        self.score_improvement_guard_require_official = _to_bool(
+            guard_config.get("require_official_score", True)
+        )
+        self.score_improvement_guard_skip_no_improvement = _to_bool(
+            guard_config.get("skip_no_improvement_on_untrusted", True)
+        )
+
         self._load_historical_results()
         if self.historical_results:
             self.kse.set_historical_results(self.historical_results)
@@ -126,6 +154,20 @@ class MasterControllerDecisionUnit(BaseComponent):
 
         if init_completed:
             self.logger.info("Resume mode: initialization already complete; skipping fetch/download.")
+            if self.kim.use_crawler:
+                self.logger.info("Resume mode: refreshing crawler data.")
+                if self.kim.refresh_crawler_data():
+                    experiment_run_dir = self.config.get("experiment_run_dir", "./experiments")
+                    crawler_src = os.path.join("kaggle_competitions", self.kim.competition_name)
+                    hypotheses_crawler_data = os.path.join(experiment_run_dir, "hypotheses", "crawler_data")
+                    if os.path.exists(crawler_src):
+                        try:
+                            shutil.copytree(crawler_src, hypotheses_crawler_data, dirs_exist_ok=True)
+                            self.logger.info("Updated crawler data in hypotheses/ for KSE access")
+                        except Exception as copy_error:
+                            self.logger.warning(f"Failed to copy crawler data to hypotheses: {copy_error}")
+                else:
+                    self.logger.warning("Resume mode: crawler refresh failed; continuing with existing data.")
         else:
             # Confirm fetching competition info
             if not self.user_confirm.confirm_kaggle_fetch(competition_name):
@@ -967,7 +1009,7 @@ class MasterControllerDecisionUnit(BaseComponent):
 
             # 2g. Update overall best and check improvement
             if analysis_result:
-                self._update_overall_best(analysis_result)
+                self._update_overall_best(analysis_result, official_scores)
 
             if not iter_state.complete:
                 experiment_run_dir = self.config.get(
@@ -1040,6 +1082,56 @@ class MasterControllerDecisionUnit(BaseComponent):
         if self.competition_info is not None and self.competition_info.higher_is_better is not None:
             return bool(self.competition_info.higher_is_better)
         return bool(getattr(self.pa, "higher_is_better", True))
+
+    def _is_untrusted_improvement(
+        self,
+        previous_best: float,
+        current_best: float,
+        current_exp_id: Optional[str],
+        official_scores: Optional[Dict[str, float]],
+    ) -> Optional[str]:
+        if not self.score_improvement_guard_enabled:
+            return None
+
+        if previous_best is None or current_best is None:
+            return None
+
+        ratio_threshold = self.score_improvement_guard_ratio
+        delta_threshold = self.score_improvement_guard_delta
+        if ratio_threshold is None and delta_threshold is None:
+            return None
+
+        higher_is_better = self._metric_higher_is_better()
+        ratio = None
+        delta = None
+        if higher_is_better:
+            if previous_best > 0 and current_best > 0:
+                ratio = current_best / previous_best
+            delta = current_best - previous_best
+        else:
+            if previous_best > 0 and current_best > 0:
+                ratio = previous_best / current_best
+            delta = previous_best - current_best
+
+        large_jump = False
+        if ratio is not None and ratio_threshold is not None and ratio_threshold > 0:
+            large_jump = ratio >= ratio_threshold
+        if delta_threshold is not None and delta_threshold > 0:
+            large_jump = large_jump or delta >= delta_threshold
+
+        if not large_jump:
+            return None
+
+        if self.score_improvement_guard_require_official:
+            if not official_scores or not current_exp_id or current_exp_id not in official_scores:
+                ratio_str = f"{ratio:.3f}" if ratio is not None else "N/A"
+                delta_str = f"{delta:.6f}" if delta is not None else "N/A"
+                return (
+                    f"large improvement detected (ratio={ratio_str}, delta={delta_str}) "
+                    "without official score confirmation"
+                )
+
+        return None
 
     def _load_historical_results(self) -> None:
         """Optionally load results from prior runs for KSE prompt context."""
@@ -1156,7 +1248,11 @@ class MasterControllerDecisionUnit(BaseComponent):
                                                       all_past_results,
                                                       official_scores=prior_official_scores)
 
-    def _update_overall_best(self, analysis_result: AnalysisResult):
+    def _update_overall_best(
+        self,
+        analysis_result: AnalysisResult,
+        official_scores: Optional[Dict[str, float]] = None,
+    ):
         """Update global best score and track iterations without improvement."""
         current_best_iter_score = analysis_result.best_score
         initial_best_score = self.best_score_overall
@@ -1172,20 +1268,46 @@ class MasterControllerDecisionUnit(BaseComponent):
                 is_improvement = current_best_iter_score < self.best_score_overall
 
             if is_improvement:
+                reason = self._is_untrusted_improvement(
+                    previous_best=self.best_score_overall,
+                    current_best=current_best_iter_score,
+                    current_exp_id=analysis_result.best_experiment_id,
+                    official_scores=official_scores,
+                )
+                if reason:
+                    self.logger.warning(
+                        f"Skipping best-score update: {reason}. "
+                        f"candidate={current_best_iter_score:.4f} "
+                        f"(Exp ID: {analysis_result.best_experiment_id})"
+                    )
+                    if self.score_improvement_guard_skip_no_improvement:
+                        return
+                    is_improvement = False
+
+            if is_improvement:
                 self.best_score_overall = current_best_iter_score
                 self.best_experiment_id_overall = analysis_result.best_experiment_id
                 self.iterations_without_improvement = 0  # Reset because improved
-                self.logger.info(f"New overall best score: {self.best_score_overall:.4f} (Exp ID: {self.best_experiment_id_overall})")
+                self.logger.info(
+                    f"New overall best score: {self.best_score_overall:.4f} "
+                    f"(Exp ID: {self.best_experiment_id_overall})"
+                )
             else:
-                 # Score stayed the same or got worse
-                 if initial_best_score is not None:  # Not the first iteration
-                     self.iterations_without_improvement += 1
-                     self.logger.info(f"Best score did not improve. Iterations without improvement: {self.iterations_without_improvement}")
+                # Score stayed the same or got worse
+                if initial_best_score is not None:  # Not the first iteration
+                    self.iterations_without_improvement += 1
+                    self.logger.info(
+                        f"Best score did not improve. "
+                        f"Iterations without improvement: {self.iterations_without_improvement}"
+                    )
         else:
-             # No valid scores this iteration
-             if initial_best_score is not None:  # Not the first iteration
-                 self.iterations_without_improvement += 1
-                 self.logger.info(f"No valid score in this iteration. Iterations without improvement: {self.iterations_without_improvement}")
+            # No valid scores this iteration
+            if initial_best_score is not None:  # Not the first iteration
+                self.iterations_without_improvement += 1
+                self.logger.info(
+                    f"No valid score in this iteration. "
+                    f"Iterations without improvement: {self.iterations_without_improvement}"
+                )
 
     def _log_waa_results_to_terminal(self, iteration_results: List[ExperimentResult],
                                      official_scores: Dict[str, float]) -> None:
@@ -1455,7 +1577,10 @@ class MasterControllerDecisionUnit(BaseComponent):
         self.best_experiment_id_overall = None
         self.iterations_without_improvement = 0
         for iter_num in sorted(self.iteration_analysis_results.keys()):
-            self._update_overall_best(self.iteration_analysis_results[iter_num])
+            self._update_overall_best(
+                self.iteration_analysis_results[iter_num],
+                self.iteration_official_scores.get(iter_num, {}),
+            )
 
         # Set current iteration to first incomplete, or next after last complete
         incomplete = self.run_state.first_incomplete_iteration()

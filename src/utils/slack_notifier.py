@@ -91,6 +91,35 @@ def build_iteration_message(
     return "\n".join(lines)
 
 
+def build_run_complete_message(
+    *,
+    competition_name: str,
+    run_id: str,
+    stop_reason: Optional[str],
+    total_iterations: int,
+    best_score: Optional[float],
+    best_experiment_id: Optional[str],
+    higher_is_better: bool,
+    best_official: Optional[tuple[str, float]] = None,
+) -> str:
+    lines = [
+        f"[{competition_name}] Run complete",
+        f"Iterations: {total_iterations}",
+    ]
+    direction = "higher is better" if higher_is_better else "lower is better"
+    lines.append(f"Metric: {direction}")
+    if stop_reason:
+        lines.append(f"Stopped: {stop_reason}")
+    else:
+        lines.append("Stopped: completed")
+    if best_score is not None and best_experiment_id:
+        lines.append(f"Best local: {best_score:.6f} ({best_experiment_id})")
+    if best_official:
+        lines.append(f"Best official: {best_official[1]:.6f} ({best_official[0]})")
+    lines.append(f"Run: {run_id}")
+    return "\n".join(lines)
+
+
 def notify_iteration_end(
     *,
     config: Dict[str, Any],
@@ -119,5 +148,41 @@ def notify_iteration_end(
         higher_is_better=higher_is_better,
         analysis_result=analysis_result,
         official_scores=official_scores,
+    )
+    return send_message(webhook_url, message, logger=logger)
+
+
+def notify_run_complete(
+    *,
+    config: Dict[str, Any],
+    competition_name: str,
+    run_id: str,
+    stop_reason: Optional[str],
+    total_iterations: int,
+    best_score: Optional[float],
+    best_experiment_id: Optional[str],
+    higher_is_better: bool,
+    best_official: Optional[tuple[str, float]] = None,
+    logger=None,
+) -> bool:
+    enabled = _as_bool(
+        config.get("slack_notify_on_run_complete", config.get("slack_notify_on_iteration_end", False))
+    )
+    if not enabled:
+        return False
+    webhook_url = resolve_webhook_url(config)
+    if not webhook_url:
+        if logger:
+            logger.warning("Slack notification enabled but no webhook URL configured.")
+        return False
+    message = build_run_complete_message(
+        competition_name=competition_name,
+        run_id=run_id,
+        stop_reason=stop_reason,
+        total_iterations=total_iterations,
+        best_score=best_score,
+        best_experiment_id=best_experiment_id,
+        higher_is_better=higher_is_better,
+        best_official=best_official,
     )
     return send_message(webhook_url, message, logger=logger)

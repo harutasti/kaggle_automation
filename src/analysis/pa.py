@@ -1,4 +1,5 @@
 import os
+import statistics
 from typing import List, Optional, Dict, Any
 import datetime
 import json
@@ -38,6 +39,88 @@ class PerformanceAnalyzer(BaseComponent):
         self.higher_is_better = is_higher_better_from_leaderboard(
             self.competition_name, self.evaluation_metric
         )
+
+        def _to_bool(value, default=False):
+            if value is None:
+                return default
+            if isinstance(value, str):
+                return value.strip().lower() not in ("false", "0", "no", "off")
+            return bool(value)
+
+        score_sanity = config.get("score_sanity", {}) or {}
+        self.score_sanity_enabled = _to_bool(score_sanity.get("enabled", False))
+        self.score_sanity_method = str(score_sanity.get("method", "mad")).lower()
+        self.score_sanity_mad_z = float(score_sanity.get("mad_z", 6.0))
+        self.score_sanity_iqr_multiplier = float(score_sanity.get("iqr_multiplier", 3.0))
+        self.score_sanity_min_samples = int(score_sanity.get("min_samples", 6))
+        self.score_sanity_only_best_side = _to_bool(score_sanity.get("only_best_side", True))
+        self.score_sanity_allow_all_if_empty = _to_bool(score_sanity.get("allow_all_if_empty", True))
+
+    def _filter_suspicious_scored_results(self, scored_results, score_label: str):
+        if not self.score_sanity_enabled:
+            return scored_results, []
+
+        if len(scored_results) < self.score_sanity_min_samples:
+            return scored_results, []
+
+        scores = [score for _, score in scored_results]
+        if not scores:
+            return scored_results, []
+
+        median = statistics.median(scores)
+        deviations = [abs(score - median) for score in scores]
+        mad = statistics.median(deviations)
+
+        suspicious = []
+        kept = []
+
+        def _flag(score):
+            if self.score_sanity_only_best_side:
+                if self.higher_is_better:
+                    return score > median
+                return score < median
+            return True
+
+        if mad > 0 and self.score_sanity_method in ("mad", "auto"):
+            scaled_mad = 1.4826 * mad
+            threshold = self.score_sanity_mad_z * scaled_mad
+            for result, score in scored_results:
+                if _flag(score):
+                    if self.score_sanity_only_best_side:
+                        if self.higher_is_better:
+                            is_suspicious = (score - median) > threshold
+                        else:
+                            is_suspicious = (median - score) > threshold
+                    else:
+                        is_suspicious = abs(score - median) > threshold
+                else:
+                    is_suspicious = False
+
+                (suspicious if is_suspicious else kept).append((result, score))
+        else:
+            try:
+                q1, q2, q3 = statistics.quantiles(scores, n=4, method="inclusive")
+            except Exception:
+                return scored_results, []
+            iqr = q3 - q1
+            if iqr <= 0:
+                return scored_results, []
+            lower = q1 - self.score_sanity_iqr_multiplier * iqr
+            upper = q3 + self.score_sanity_iqr_multiplier * iqr
+            for result, score in scored_results:
+                if self.score_sanity_only_best_side:
+                    if self.higher_is_better:
+                        is_suspicious = score > upper
+                    else:
+                        is_suspicious = score < lower
+                else:
+                    is_suspicious = score < lower or score > upper
+                (suspicious if is_suspicious else kept).append((result, score))
+
+        if not kept and self.score_sanity_allow_all_if_empty:
+            return scored_results, suspicious
+
+        return kept, suspicious
 
     def analyze_results(self, iteration: int, results: List[ExperimentResult],
                        official_scores: Optional[Dict[str, float]] = None) -> AnalysisResult:
@@ -95,16 +178,34 @@ class PerformanceAnalyzer(BaseComponent):
 
             # Fall back to CV scores if no official scores
             if best_score_current_iter is None:
-                successful_results.sort(key=lambda r: r.score, reverse=self.higher_is_better)
-                best_exp_current_iter = successful_results[0]
-                best_score_current_iter = best_exp_current_iter.score
-                best_exp_id_current_iter = best_exp_current_iter.experiment_id
-                scores = [r.score for r in successful_results]
-                direction = "higher is better" if self.higher_is_better else "lower is better"
-                self.logger.info(
-                    f"Best CV score in iteration {iteration}: {best_score_current_iter:.4f} "
-                    f"(Exp ID: {best_exp_id_current_iter}, {direction})"
+                scored_results = [(r, r.score) for r in successful_results if r.score is not None]
+                filtered, filtered_outliers = self._filter_suspicious_scored_results(
+                    scored_results,
+                    score_label="cv"
                 )
+                if filtered_outliers:
+                    filtered_ids = [r.experiment_id for r, _ in filtered_outliers]
+                    self.logger.warning(
+                        f"Score sanity filter excluded {len(filtered_outliers)} CV outlier(s): "
+                        f"{', '.join(filtered_ids[:5])}{'...' if len(filtered_ids) > 5 else ''}"
+                    )
+                if not filtered and scored_results:
+                    self.logger.warning("Score sanity filter removed all CV scores; using unfiltered results.")
+                    filtered = scored_results
+
+                if filtered:
+                    best_exp_current_iter, best_score_current_iter = (
+                        max(filtered, key=lambda x: x[1])
+                        if self.higher_is_better
+                        else min(filtered, key=lambda x: x[1])
+                    )
+                    best_exp_id_current_iter = best_exp_current_iter.experiment_id
+                    scores = [score for _, score in filtered]
+                    direction = "higher is better" if self.higher_is_better else "lower is better"
+                    self.logger.info(
+                        f"Best CV score in iteration {iteration}: {best_score_current_iter:.4f} "
+                        f"(Exp ID: {best_exp_id_current_iter}, {direction})"
+                    )
 
         # Improvement trend (placeholder: would need full history from RAD)
         # all_results = rad.get_all_results()  # RAD instance required

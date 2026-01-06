@@ -11,6 +11,7 @@ sys.path.insert(0, project_root)
 
 from src.core.mcdu import MasterControllerDecisionUnit
 from src.utils.logger import setup_logger
+from src.utils.slack_notifier import notify_run_complete
 from src.utils.file_utils import ensure_dir
 from src.utils.system_specs import SystemSpecsDetector
 
@@ -333,6 +334,35 @@ def main():
         mcdu = MasterControllerDecisionUnit(config)
         mcdu.run_main_loop()
         logger.info("AutoKaggle finished successfully.")
+        try:
+            higher_is_better = mcdu._metric_higher_is_better()
+        except Exception:
+            higher_is_better = True
+
+        best_official = None
+        try:
+            all_official = []
+            for scores in mcdu.iteration_official_scores.values():
+                if scores:
+                    all_official.extend(scores.items())
+            if all_official:
+                all_official.sort(key=lambda kv: kv[1], reverse=higher_is_better)
+                best_official = all_official[0]
+        except Exception:
+            best_official = None
+
+        notify_run_complete(
+            config=config,
+            competition_name=config.get("kaggle_competition_name", "unknown"),
+            run_id=os.path.basename(os.path.abspath(experiment_run_dir)),
+            stop_reason=mcdu.stop_reason,
+            total_iterations=mcdu.current_iteration,
+            best_score=mcdu.best_score_overall,
+            best_experiment_id=mcdu.best_experiment_id_overall,
+            higher_is_better=higher_is_better,
+            best_official=best_official,
+            logger=logger,
+        )
     except Exception as e:
         logger.critical("An unhandled exception occurred in the main loop.", exc_info=True)
         print(f"Critical error: {e}. Check log file for details.")

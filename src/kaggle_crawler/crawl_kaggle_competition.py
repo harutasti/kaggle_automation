@@ -1,12 +1,12 @@
 import asyncio
 import os
 import re
-import subprocess
 import argparse
 import shutil
 import glob
 import json
 import sys
+import zipfile
 from pathlib import Path
 from tqdm import tqdm
 from crawl4ai import AsyncWebCrawler, BrowserConfig, CrawlerRunConfig, CacheMode
@@ -22,6 +22,17 @@ except Exception:
 # --------------------------------------------------------------------------- #
 # Page-level helpers                                                          #
 # --------------------------------------------------------------------------- #
+async def _scroll_discussion_list(page) -> None:
+    """Try to trigger lazy-loading for discussion lists."""
+    print("[HOOK] scrolling discussion list")
+    try:
+        for _ in range(8):
+            await page.mouse.wheel(0, 3000)
+            await asyncio.sleep(1)
+    except Exception as e:
+        print(f"[HOOK] scroll discussion list failed: {e}")
+
+
 async def before_retrieve_html(page, context, **kwargs):
     """
     Hook executed by crawl4ai *before* the HTML of a page is captured.
@@ -55,6 +66,13 @@ async def before_retrieve_html(page, context, **kwargs):
                 print(f"Selector {sel!r} raised {e}")
     except Exception as e:
         print(f"Pop-up handler raised {e}")
+
+    try:
+        url = page.url or ""
+    except Exception:
+        url = ""
+    if "/discussion" in url and "sort=votes" in url:
+        await _scroll_discussion_list(page)
     return page
 
 
@@ -97,6 +115,91 @@ async def safe_arun(crawler, url, cfg, max_retries: int = 5):
     return None
 
 
+def _resolve_optional_path(cli_value, env_var, candidates):
+    if cli_value:
+        candidate = Path(cli_value).expanduser()
+        if candidate.exists():
+            return candidate
+        print(f"[cookies] {candidate} not found")
+        return None
+
+    env_value = os.environ.get(env_var)
+    if env_value:
+        candidate = Path(env_value).expanduser()
+        if candidate.exists():
+            return candidate
+        print(f"[cookies] {env_var} set but file missing: {candidate}")
+        return None
+
+    for candidate in candidates:
+        if candidate.exists():
+            return candidate
+
+    return None
+
+
+def _load_json_file(path: Path):
+    try:
+        with path.open("r", encoding="utf-8") as handle:
+            return json.load(handle)
+    except FileNotFoundError:
+        print(f"[cookies] file not found: {path}")
+    except Exception as e:
+        print(f"[cookies] failed to read {path}: {e}")
+    return None
+
+
+def _load_cookie_settings(cookies_path: Path | None, storage_state_path: Path | None):
+    cookies = []
+    storage_state = None
+
+    if storage_state_path:
+        data = _load_json_file(storage_state_path)
+        if isinstance(data, dict):
+            storage_state = data
+            if isinstance(data.get("cookies"), list):
+                cookies = data["cookies"]
+            print(f"[cookies] loaded storage state from {storage_state_path}")
+        else:
+            print(f"[cookies] invalid storage state format in {storage_state_path}")
+
+    if cookies_path:
+        data = _load_json_file(cookies_path)
+        if isinstance(data, list):
+            cookies = data
+        elif isinstance(data, dict):
+            if isinstance(data.get("cookies"), list):
+                cookies = data["cookies"]
+            elif "name" in data and "value" in data:
+                cookies = [data]
+            else:
+                print(f"[cookies] unrecognized cookie format in {cookies_path}")
+        else:
+            print(f"[cookies] invalid cookie format in {cookies_path}")
+
+        if cookies:
+            print(f"[cookies] loaded {len(cookies)} cookies from {cookies_path}")
+
+    return cookies, storage_state
+
+
+def _extract_discussion_links(html: str, competition_id: str) -> list:
+    pattern = rf'href="(/competitions/{re.escape(competition_id)}/discussion/\d+[^"]*)"'
+    matches = re.findall(pattern, html)
+    links = [f"https://www.kaggle.com{m}#appreciation" for m in matches]
+    return list(dict.fromkeys(links))
+
+
+def _save_discussion_list_html(debug_dir: Path, label: str, html: str) -> None:
+    try:
+        debug_dir.mkdir(parents=True, exist_ok=True)
+        output_path = debug_dir / f"discussion_list_{label}.html"
+        output_path.write_text(html, encoding="utf-8")
+        print(f"[discussion] saved list HTML -> {output_path}")
+    except Exception as e:
+        print(f"[discussion] failed to save list HTML: {e}")
+
+
 def clean_markdown(md: str, competition_id: str, page_type: str = "overview"):
     """
     Simple clean-ups for Kaggle Markdown (navigation bars, cookie banners, etc.).
@@ -132,7 +235,8 @@ def download_kaggle_competition_data(competition_id: str, output_dir: str) -> bo
     kaggle_json_src = Path.cwd() / "kaggle.json"
     if not kaggle_json_src.exists():
         kaggle_json_src = current_dir / "kaggle.json"
-    kaggle_dir_dest = Path.home() / ".kaggle"
+    kaggle_config_dir = os.environ.get("KAGGLE_CONFIG_DIR")
+    kaggle_dir_dest = Path(kaggle_config_dir) if kaggle_config_dir else Path.home() / ".kaggle"
     kaggle_json_dest = kaggle_dir_dest / "kaggle.json"
 
     data_dir = Path(output_dir) / "data"
@@ -189,14 +293,12 @@ def download_kaggle_competition_data(competition_id: str, output_dir: str) -> bo
         print(f"[download] downloading competition files for {competition_id}")
         api.competition_download_files(competition_id, path=str(data_dir), force=True)
 
-        # Unzip all .zip files (using glob to avoid shell injection)
+        # Unzip all .zip files using Python to avoid shell dependencies.
         zip_files = list(data_dir.glob("*.zip"))
         for zip_file in zip_files:
             print(f"[download] unzipping {zip_file}")
-            subprocess.run(
-                ['unzip', '-o', str(zip_file), '-d', str(data_dir)],
-                check=True
-            )
+            with zipfile.ZipFile(zip_file, "r") as zf:
+                zf.extractall(data_dir)
 
         # Remove the .zip files after extraction
         for zip_file in zip_files:
@@ -206,9 +308,6 @@ def download_kaggle_competition_data(competition_id: str, output_dir: str) -> bo
         print("[download] data download, extraction, and cleanup complete")
         return True
 
-    except subprocess.CalledProcessError as e:
-        print(f"[download] command returned {e.returncode}: {e.cmd}")
-        return False
     except Exception as e:
         import traceback
         print(f"[download] unexpected error: {e}")
@@ -520,6 +619,16 @@ async def main():
         action="store_true",
         help="Only download competition data and skip crawling pages/discussions",
     )
+    parser.add_argument(
+        "--cookies-path",
+        default=None,
+        help="Path to JSON cookies for a logged-in Kaggle session",
+    )
+    parser.add_argument(
+        "--storage-state-path",
+        default=None,
+        help="Path to Playwright storage state JSON for a logged-in session",
+    )
     args = parser.parse_args()
 
     competition_id = args.competition_id
@@ -547,11 +656,31 @@ async def main():
         return
 
     # 2. Crawler
+    cookies_path = _resolve_optional_path(
+        args.cookies_path,
+        "KAGGLE_COOKIES_PATH",
+        [
+            Path.cwd() / "kaggle_cookies.json",
+            Path.home() / ".kaggle" / "kaggle_cookies.json",
+        ],
+    )
+    storage_state_path = _resolve_optional_path(
+        args.storage_state_path,
+        "KAGGLE_STORAGE_STATE_PATH",
+        [
+            Path.cwd() / "kaggle_storage_state.json",
+            Path.home() / ".kaggle" / "kaggle_storage_state.json",
+        ],
+    )
+    cookies, storage_state = _load_cookie_settings(cookies_path, storage_state_path)
+
     browser_cfg = BrowserConfig(
         headless=not args.visible,
         verbose=True,
         viewport_width=1920,
         viewport_height=1080,
+        cookies=cookies,
+        storage_state=storage_state,
     )
     print(f"[setup] browser running in {'visible' if args.visible else 'headless'} mode")
 
@@ -576,37 +705,69 @@ async def main():
         # 4. Discussions
         print("\n=== Crawling discussion threads (most-voted) ===")
         list_url = f"{base_url}/discussion?sort=votes"
-        # Discussion list page is also dynamic; avoid waiting for full network idle.
         list_cfg = CrawlerRunConfig(
             cache_mode=CacheMode.BYPASS,
             wait_until="domcontentloaded",
-            page_timeout=60_000,
+            wait_for="a[href*='/discussion/']",
+            wait_for_timeout=20_000,
+            page_timeout=90_000,
+            scan_full_page=True,
+            scroll_delay=0.5,
+            max_scroll_steps=12,
+            simulate_user=True,
+            magic=True,
+            remove_overlay_elements=True,
+            override_navigator=True,
+        )
+        list_cfg_networkidle = list_cfg.clone(
+            wait_until="networkidle",
+            page_timeout=120_000,
+            max_scroll_steps=20,
+            scroll_delay=0.7,
         )
 
-        list_res = await safe_arun(crawler, list_url, list_cfg)
-        if not list_res or not list_res.html:
-            print("[discussion] failed to fetch discussion list – skipping")
-        else:
-            pattern = rf'href="(/competitions/{re.escape(competition_id)}/discussion/\d+[^"]*)"'
-            matches = re.findall(pattern, list_res.html)
-            links = [f"https://www.kaggle.com{m}#appreciation" for m in matches]
-            unique_links = list(dict.fromkeys(links))[: args.max_discussions]
+        debug_dir = discussions_dir / "_debug"
+        list_attempts = [
+            ("domcontentloaded", list_cfg),
+            ("networkidle", list_cfg_networkidle),
+        ]
+        unique_links = []
+
+        for label, cfg in list_attempts:
+            list_res = await safe_arun(crawler, list_url, cfg)
+            if not list_res or not list_res.html:
+                print(f"[discussion] failed to fetch discussion list ({label})")
+                continue
+
+            _save_discussion_list_html(debug_dir, label, list_res.html)
+            links = _extract_discussion_links(list_res.html, competition_id)
+            if links:
+                unique_links = links[: args.max_discussions]
+                print(
+                    f"[discussion] found {len(unique_links)} discussion links "
+                    f"(limited to {args.max_discussions})"
+                )
+                break
+
+            print(f"[discussion] no links found using {label}; retrying")
+
+        if not unique_links:
             print(
-                f"[discussion] found {len(unique_links)} discussion links "
+                f"[discussion] found 0 discussion links "
                 f"(limited to {args.max_discussions})"
             )
 
-            for idx, url in enumerate(tqdm(unique_links, desc="discussions"), 1):
-                m = re.search(r"/discussion/(\d+)", url)
-                thread_id = m.group(1) if m else f"thread_{idx:03d}"
-                out_path = discussions_dir / f"discussion_{thread_id}.md"
+        for idx, url in enumerate(tqdm(unique_links, desc="discussions"), 1):
+            m = re.search(r"/discussion/(\d+)", url)
+            thread_id = m.group(1) if m else f"thread_{idx:03d}"
+            out_path = discussions_dir / f"discussion_{thread_id}.md"
 
-                if out_path.exists():
-                    print(f"[discussion] skip existing {out_path.name}")
-                    continue
+            if out_path.exists():
+                print(f"[discussion] skip existing {out_path.name}")
+                continue
 
-                await crawl_discussion_page(crawler, url, out_path, thread_id)
-                await asyncio.sleep(1)
+            await crawl_discussion_page(crawler, url, out_path, thread_id)
+            await asyncio.sleep(1)
 
     # 5. Cleaning & aggregation
     print("\n=== Cleaning discussions & aggregating up-voted content ===")

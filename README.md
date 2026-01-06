@@ -201,12 +201,20 @@ Configs are JSON files in `config/`. The most important keys:
 - `stop_condition`:
   - `score_threshold` (optional)
   - `no_improvement_iterations`
+- `score_sanity`: filter suspiciously extreme scores before choosing the per-iteration best
+  - `enabled`, `method` (`mad`/`iqr`), `mad_z`, `iqr_multiplier`, `min_samples`, `only_best_side`
+- `score_improvement_guard`: gate large score jumps until confirmed
+  - `enabled`, `max_improvement_ratio`, `max_improvement_delta`, `require_official_score`, `skip_no_improvement_on_untrusted`
 - `simulation_mode`: if `true`, avoids **Codex calls only** and uses the simulator for WAAs; Kaggle API + crawler/data download still run (submissions are disabled)
 - `use_crawler`: whether to crawl Kaggle pages/discussions with Playwright
+- `max_discussions`: max number of discussion threads to crawl (top-N by votes)
+- `codex_web_search_enabled`: enable Codex `--search` for selected modes
+- `codex_web_search_modes`: list of modes to use web search (e.g., `["KSE"]`)
 - `experiment_pyproject_path`: per-experiment dependency spec copied into each worktree
 - `kaggle_score_wait_timeout_seconds`: how long to poll Kaggle for official scores after submissions
 - `kaggle_score_poll_interval_seconds`: polling interval for checking submission scores
 - `slack_notify_on_iteration_end`: send a Slack message after each iteration (default false)
+- `slack_notify_on_run_complete`: send a Slack message when a run finishes (default false)
 - `slack_webhook_url`: Slack webhook URL (optional; prefer env var)
 - `slack_webhook_env`: env var name for webhook (default `SLACK_WEBHOOK_URL`)
 - `codex_web_search_enabled`: enable Codex CLI web search (default false)

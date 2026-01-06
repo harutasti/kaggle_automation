@@ -12,12 +12,32 @@
     "score_threshold": null,
     "no_improvement_iterations": 2
   },
+  "score_sanity": {
+    "enabled": true,
+    "method": "mad",
+    "mad_z": 6.0,
+    "iqr_multiplier": 3.0,
+    "min_samples": 6,
+    "only_best_side": true,
+    "allow_all_if_empty": true
+  },
+  "score_improvement_guard": {
+    "enabled": true,
+    "max_improvement_ratio": 2.0,
+    "max_improvement_delta": null,
+    "require_official_score": true,
+    "skip_no_improvement_on_untrusted": true
+  },
   "experiments_base_dir": "./experiments",
   "log_file": "./logs/auto_kaggle.log",
   "log_level": "INFO",
   "simulation_mode": false,
   "use_crawler": true,
-  "max_discussions": 20,
+  "max_discussions": 100,
+  "codex_web_search_enabled": true,
+  "codex_web_search_modes": [
+    "KSE"
+  ],
   "analyze_dataset": true,
   "prompts_dir": "prompts",
   "experiment_pyproject_path": "config/experiment_pyproject.toml",
@@ -33,6 +53,7 @@
   "codex_web_search_enabled": true,
   "codex_web_search_modes": ["KSE"],
   "slack_notify_on_iteration_end": true,
+  "slack_notify_on_run_complete": true,
   "slack_webhook_env": "SLACK_WEBHOOK_URL",
   "codex_live_view": {
     "enabled": true,
